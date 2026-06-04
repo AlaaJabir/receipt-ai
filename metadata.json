@@ -1,0 +1,6 @@
+{
+  "name": "Receipt AI",
+  "description": "A professional and polished dashboard interface for receipt and expense tracking analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
