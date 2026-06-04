@@ -1,5 +1,11 @@
 import { app } from '../server';
 
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
 export default function handler(req: any, res: any) {
   const { path, ...query } = req.query || {};
   const route = Array.isArray(path) ? path.join('/') : path || '';

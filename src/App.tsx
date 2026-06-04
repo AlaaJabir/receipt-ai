@@ -63,6 +63,18 @@ function numberValue(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+async function readApiResponse(res: Response) {
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return res.json();
+  }
+
+  const text = await res.text();
+  return {
+    error: text.trim() || `Request failed with status ${res.status}`,
+  };
+}
+
 function receiptToForm(receipt: Receipt): ReceiptFormState {
   return {
     merchant: receipt.merchant || '',
@@ -118,7 +130,7 @@ export default function App() {
     setError('');
     try {
       const res = await fetch(`/api/receipts?${queryString}`);
-      const data = await res.json();
+      const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to load receipts.');
       setReceipts(data.receipts || []);
       setSelectedReceipt(current => {
@@ -144,7 +156,7 @@ export default function App() {
 
   useEffect(() => {
     fetch('/api/health')
-      .then(res => res.json())
+      .then(readApiResponse)
       .then(data => setHealth(data.supabase === 'ok' ? 'connected' : data.supabase || 'error'))
       .catch(() => setHealth('offline'));
   }, []);
@@ -188,7 +200,7 @@ export default function App() {
       const formData = new FormData();
       formData.append('receipt', file);
       const res = await fetch('/api/receipts/process', { method: 'POST', body: formData });
-      const data = await res.json();
+      const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to process receipt.');
       setReceipts(prev => [data.receipt, ...prev]);
       setSelectedReceipt(data.receipt);
@@ -215,7 +227,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
+      const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to save receipt.');
       setReceipts(prev => prev.map(receipt => (receipt.id === id ? data.receipt : receipt)));
       setSelectedReceipt(data.receipt);
@@ -237,7 +249,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status }),
       });
-      const data = await res.json();
+      const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to update status.');
       setReceipts(prev => prev.map(receipt => (receipt.id === selectedReceipt.id ? data.receipt : receipt)));
       setSelectedReceipt(data.receipt);
@@ -256,7 +268,7 @@ export default function App() {
     setError('');
     try {
       const res = await fetch(`/api/receipts/${selectedReceipt.id}`, { method: 'DELETE' });
-      const data = await res.json();
+      const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to delete receipt.');
       const remaining = receipts.filter(receipt => receipt.id !== selectedReceipt.id);
       setReceipts(remaining);
@@ -274,7 +286,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/receipts/${selectedReceipt.id}/export-pdf`);
       if (!res.ok) {
-        const data = await res.json();
+        const data = await readApiResponse(res);
         throw new Error(data.error || 'PDF export failed.');
       }
       const blob = await res.blob();
