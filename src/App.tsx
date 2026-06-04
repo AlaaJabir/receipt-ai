@@ -1,411 +1,858 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  BarChart3,
+  Check,
+  ChevronRight,
+  CircleDollarSign,
+  Download,
+  FileText,
+  Filter,
+  Home,
+  Loader2,
+  Pencil,
+  PieChart as PieChartIcon,
+  RefreshCw,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import type {
+  DashboardSettings,
+  Receipt,
+  ReceiptCategory,
+  ReceiptFilters,
+  ReceiptFormState,
+  ReceiptStatus,
+} from './types';
 
-import React, { useEffect, useState, useRef } from 'react';
-import type { Receipt } from './types';
-import { jsPDF } from 'jspdf';
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
+const categories: ReceiptCategory[] = ['Meals', 'Transport', 'Software', 'Office', 'Fuel', 'Travel', 'Utilities', 'Other'];
+const statuses: ReceiptStatus[] = ['Pending Approval', 'Approved', 'Rejected'];
+const chartColors = ['#F97316', '#14B8A6', '#60A5FA', '#A78BFA', '#FACC15', '#FB7185', '#34D399', '#94A3B8'];
+const defaultSettings: DashboardSettings = { defaultCurrency: 'MAD', vatLabel: 'TVA récupérable', compactMode: false };
+
+type Page = 'dashboard' | 'analytics' | 'settings';
+
+function getCurrentMonth() {
+  return new Date().toISOString().slice(0, 7);
+}
+
+function money(value: number | null | undefined, currency = 'MAD') {
+  return `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })} ${currency}`;
+}
+
+function numberValue(value: string) {
+  if (!value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function receiptToForm(receipt: Receipt): ReceiptFormState {
+  return {
+    merchant: receipt.merchant || '',
+    transaction_ref: receipt.transaction_ref || '',
+    date: receipt.date || '',
+    category: receipt.category || 'Other',
+    total: receipt.total === null ? '' : String(receipt.total),
+    currency: receipt.currency || 'MAD',
+    ht: receipt.ht === null ? '' : String(receipt.ht),
+    tva: receipt.tva === null ? '' : String(receipt.tva),
+    insight: receipt.insight || '',
+    status: receipt.status || 'Pending Approval',
+  };
+}
 
 export default function App() {
+  const [page, setPage] = useState<Page>('dashboard');
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
+  const [filters, setFilters] = useState<ReceiptFilters>({
+    month: getCurrentMonth(),
+    category: 'All',
+    status: 'All',
+    search: '',
+    from: '',
+    to: '',
+  });
+  const [settings, setSettings] = useState<DashboardSettings>(() => {
+    try {
+      return { ...defaultSettings, ...JSON.parse(localStorage.getItem('receiptai-settings') || '{}') };
+    } catch {
+      return defaultSettings;
+    }
+  });
+  const [editForm, setEditForm] = useState<ReceiptFormState | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [health, setHealth] = useState('checking');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const queryString = useMemo(() => {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]: [string, string]) => {
+      if (value && value !== 'All') params.set(key, value);
+    });
+    return params.toString();
+  }, [filters]);
+
+  const fetchReceipts = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/receipts?${queryString}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load receipts.');
+      setReceipts(data.receipts || []);
+      setSelectedReceipt(current => {
+        if (current && data.receipts?.some((receipt: Receipt) => receipt.id === current.id)) {
+          return data.receipts.find((receipt: Receipt) => receipt.id === current.id);
+        }
+        return data.receipts?.[0] || null;
+      });
+    } catch (err: any) {
+      setError(err.message || 'Network error while loading receipts.');
+    } finally {
+      setLoading(false);
+    }
+  }, [queryString]);
 
   useEffect(() => {
     fetchReceipts();
+  }, [fetchReceipts]);
+
+  useEffect(() => {
+    localStorage.setItem('receiptai-settings', JSON.stringify(settings));
+  }, [settings]);
+
+  useEffect(() => {
+    fetch('/api/health')
+      .then(res => res.json())
+      .then(data => setHealth(data.supabase === 'ok' ? 'connected' : data.supabase || 'error'))
+      .catch(() => setHealth('offline'));
   }, []);
 
-  const fetchReceipts = async () => {
-    try {
-      const res = await fetch('/api/receipts');
-      if (!res.ok) {
-        const text = await res.text();
-        if (text.includes('relation "receipts" does not exist')) {
-            setError('The "receipts" table does not exist in your Supabase project. Please create it manually.');
-            return;
-        }
-        throw new Error('Failed to fetch receipts');
-      }
-      const data = await res.json();
-      if (data.receipts) {
-        setReceipts(data.receipts);
-        if (data.receipts.length > 0 && !selectedReceipt) {
-          setSelectedReceipt(data.receipts[0]);
-        }
-      }
-    } catch (err: any) {
-      setError(err.message || String(err));
-    }
-  };
+  const totals = useMemo(() => {
+    const total = receipts.reduce((sum, receipt) => sum + Number(receipt.total || 0), 0);
+    const tva = receipts.reduce((sum, receipt) => sum + Number(receipt.tva || 0), 0);
+    const average = receipts.length ? total / receipts.length : 0;
+    const counts = statuses.reduce(
+      (acc, status) => ({ ...acc, [status]: receipts.filter(receipt => receipt.status === status).length }),
+      {} as Record<ReceiptStatus, number>,
+    );
+    return { total, tva, average, counts };
+  }, [receipts]);
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const categoryData = useMemo(() => {
+    const grouped = new Map<string, number>();
+    receipts.forEach(receipt => grouped.set(receipt.category || 'Other', (grouped.get(receipt.category || 'Other') || 0) + Number(receipt.total || 0)));
+    return Array.from(grouped.entries()).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [receipts]);
+
+  const monthlyTrend = useMemo(() => {
+    const grouped = new Map<string, number>();
+    receipts.forEach(receipt => {
+      const source = receipt.date || receipt.created_at;
+      const parsed = new Date(source || '');
+      const label = Number.isNaN(parsed.getTime()) ? 'Unknown' : parsed.toISOString().slice(0, 7);
+      grouped.set(label, (grouped.get(label) || 0) + Number(receipt.total || 0));
+    });
+    return Array.from(grouped.entries()).map(([month, total]) => ({ month, total })).sort((a, b) => a.month.localeCompare(b.month));
+  }, [receipts]);
+
+  async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
     if (!file) return;
 
-    setIsUploading(true);
+    setUploading(true);
     setError('');
-
     try {
-      const getBase64 = (file: File): Promise<string> => {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.readAsDataURL(file);
-          reader.onload = () => {
-             const base64Data = reader.result?.toString().split(',')[1];
-             if (base64Data) resolve(base64Data);
-             else reject(new Error('Failed to parse file base64'));
-          };
-          reader.onerror = error => reject(error);
-        });
-      };
-
-      const base64Data = await getBase64(file);
-
-      const res = await fetch('/api/receipts/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64Data, mimeType: file.type })
-      });
-
-      let data;
-      try {
-        data = await res.json();
-      } catch (e) {
-        throw new Error('Server returned an invalid response. The file might be too large.');
-      }
-      
-      if (!res.ok) {
-          if (data.error?.includes('relation "receipts" does not exist') || data.error?.includes('relation "public.receipts" does not exist')) {
-              throw new Error('The "receipts" table does not exist in your Supabase database. Please create it first.');
-          }
-          throw new Error(data.error || 'Failed to process receipt');
-      }
-
-      if (data.receipt) {
-        setReceipts(prev => [data.receipt, ...prev]);
-        setSelectedReceipt(data.receipt);
-      }
+      const formData = new FormData();
+      formData.append('receipt', file);
+      const res = await fetch('/api/receipts/process', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to process receipt.');
+      setReceipts(prev => [data.receipt, ...prev]);
+      setSelectedReceipt(data.receipt);
+      setPage('dashboard');
     } catch (err: any) {
-      setError(err.message);
+      setError(err.message || 'Upload failed.');
     } finally {
-      setIsUploading(false);
+      setUploading(false);
     }
-  };
+  }
 
-  const calculateTotal = () => receipts.reduce((acc, r) => acc + (r.total || 0), 0);
-  const calculateTVA = () => receipts.reduce((acc, r) => acc + (r.tva || 0), 0);
+  async function updateReceipt(id: string, updates: Partial<ReceiptFormState>) {
+    setSaving(true);
+    setError('');
+    try {
+      const payload = {
+        ...updates,
+        total: updates.total !== undefined ? numberValue(updates.total) : undefined,
+        ht: updates.ht !== undefined ? numberValue(updates.ht) : undefined,
+        tva: updates.tva !== undefined ? numberValue(updates.tva) : undefined,
+      };
+      const res = await fetch(`/api/receipts/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save receipt.');
+      setReceipts(prev => prev.map(receipt => (receipt.id === id ? data.receipt : receipt)));
+      setSelectedReceipt(data.receipt);
+      setEditForm(null);
+    } catch (err: any) {
+      setError(err.message || 'Could not save changes.');
+    } finally {
+      setSaving(false);
+    }
+  }
 
-  const getCategoryData = () => {
-    const categoryTotals: Record<string, number> = {};
-    receipts.forEach(r => {
-      const cat = r.category || 'Uncategorized';
-      categoryTotals[cat] = (categoryTotals[cat] || 0) + (r.total || 0);
-    });
-    return Object.entries(categoryTotals).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-  };
-
-  const categoryData = getCategoryData();
-  const COLORS = ['#FF6B00', '#4CAF50', '#2196F3', '#9C27B0', '#FFC107', '#00BCD4', '#795548', '#607D8B'];
-
-  const downloadPDF = () => {
+  async function updateStatus(status: ReceiptStatus) {
     if (!selectedReceipt) return;
+    setSaving(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/receipts/${selectedReceipt.id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update status.');
+      setReceipts(prev => prev.map(receipt => (receipt.id === selectedReceipt.id ? data.receipt : receipt)));
+      setSelectedReceipt(data.receipt);
+    } catch (err: any) {
+      setError(err.message || 'Status update failed.');
+    } finally {
+      setSaving(false);
+    }
+  }
 
-    const doc = new jsPDF();
-    const { merchant, date, category, total, currency, ht, tva, id } = selectedReceipt;
-    const ref = id.substring(0, 8).toUpperCase();
+  async function deleteReceipt() {
+    if (!selectedReceipt) return;
+    const confirmed = window.confirm(`Delete receipt from ${selectedReceipt.merchant || 'Unknown merchant'}?`);
+    if (!confirmed) return;
+    setSaving(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/receipts/${selectedReceipt.id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete receipt.');
+      const remaining = receipts.filter(receipt => receipt.id !== selectedReceipt.id);
+      setReceipts(remaining);
+      setSelectedReceipt(remaining[0] || null);
+    } catch (err: any) {
+      setError(err.message || 'Delete failed.');
+    } finally {
+      setSaving(false);
+    }
+  }
 
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(22);
-    doc.text("Receipt Export", 20, 20);
+  async function exportPdf() {
+    if (!selectedReceipt) return;
+    setError('');
+    try {
+      const res = await fetch(`/api/receipts/${selectedReceipt.id}/export-pdf`);
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'PDF export failed.');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `ReceiptAI_${(selectedReceipt.transaction_ref || selectedReceipt.id).slice(0, 12)}.pdf`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err.message || 'PDF export failed.');
+    }
+  }
 
-    doc.setFontSize(12);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(100);
-    doc.text("Generated by ReceiptAI", 20, 28);
-    
-    doc.setDrawColor(200);
-    doc.setFillColor(250, 250, 250);
-    doc.roundedRect(20, 40, 170, 100, 3, 3, "FD");
-
-    doc.setTextColor(0);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(16);
-    doc.text(merchant || "Unknown Merchant", 30, 55);
-
-    doc.setFontSize(10);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(100);
-    doc.text(`Transaction Ref: ${ref} • ${date}`, 30, 62);
-
-    doc.line(30, 70, 180, 70);
-
-    doc.setTextColor(0);
-    doc.setFont("helvetica", "bold");
-    doc.text("Category", 30, 85);
-    doc.setFont("helvetica", "normal");
-    doc.text(category || "Uncategorized", 70, 85);
-
-    doc.setFont("helvetica", "bold");
-    doc.text("Amount HT", 30, 95);
-    doc.setFont("helvetica", "normal");
-    doc.text(`${ht ? ht.toFixed(2) : '---'} ${currency || 'DH'}`, 70, 95);
-
-    doc.setFont("helvetica", "bold");
-    doc.text("TVA", 30, 105);
-    doc.setFont("helvetica", "normal");
-    doc.text(`${tva ? tva.toFixed(2) : '---'} ${currency || 'DH'}`, 70, 105);
-
-    doc.setFontSize(14);
-    doc.setFont("helvetica", "bold");
-    doc.text("TOTAL:", 30, 125);
-    doc.text(`${total ? total.toFixed(2) : '---'} ${currency || 'DH'}`, 70, 125);
-
-    doc.save(`ReceiptAI_${ref}_${(merchant || 'receipt').replace(/\s+/g, '_')}.pdf`);
-  };
+  const navItems = [
+    { page: 'dashboard' as const, label: 'Dashboard', icon: Home },
+    { page: 'analytics' as const, label: 'Analytics', icon: BarChart3 },
+    { page: 'settings' as const, label: 'Settings', icon: Settings },
+  ];
 
   return (
-    <div className="min-h-screen bg-[#0A0A0A] text-gray-100 font-sans flex flex-col overflow-hidden">
-      {/* Header Navigation */}
-      <header className="flex items-center justify-between px-8 py-6 border-b border-white/5">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-[#FF6B00] rounded-xl flex items-center justify-center shadow-lg shadow-[#FF6B00]/20">
-            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6 text-black" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
+    <div className="min-h-screen bg-[#080808] text-slate-100">
+      <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,application/pdf" className="hidden" onChange={handleUpload} />
+
+      <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 border-r border-white/10 bg-black/50 p-5 backdrop-blur-xl lg:block">
+        <div className="flex items-center gap-3 px-2">
+          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-orange-500 text-black shadow-lg shadow-orange-500/20">
+            <FileText size={24} />
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Receipt<span className="text-[#FF6B00]">AI</span></h1>
+          <div>
+            <h1 className="text-xl font-bold">Receipt<span className="text-orange-500">AI</span></h1>
+            <p className="text-xs text-slate-500">AI expense operations</p>
+          </div>
         </div>
-        <div className="flex items-center gap-6">
-          <div className="flex bg-white/5 p-1 rounded-lg">
-            <button className="px-4 py-1.5 rounded-md bg-[#FF6B00] text-black font-semibold text-sm cursor-pointer">October</button>
-            <button className="px-4 py-1.5 rounded-md text-gray-400 hover:text-gray-200 font-medium text-sm cursor-pointer transition-colors">September</button>
-          </div>
-          <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-gray-700 to-gray-600 border border-white/10 cursor-pointer"></div>
+
+        <nav className="mt-10 space-y-2">
+          {navItems.map(item => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.page}
+                onClick={() => setPage(item.page)}
+                className={`flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium transition ${
+                  page === item.page ? 'bg-orange-500 text-black' : 'text-slate-400 hover:bg-white/10 hover:text-white'
+                }`}
+              >
+                <Icon size={18} />
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          className="mt-8 flex w-full items-center justify-center gap-2 rounded-lg bg-white px-4 py-3 text-sm font-bold text-black transition hover:bg-orange-100 disabled:opacity-60"
+        >
+          {uploading ? <Loader2 className="animate-spin" size={18} /> : <Upload size={18} />}
+          Upload receipt
+        </button>
+
+        <div className="absolute bottom-5 left-5 right-5 rounded-lg border border-white/10 bg-white/[0.04] p-4">
+          <p className="text-xs uppercase tracking-wide text-slate-500">Supabase</p>
+          <p className={`mt-1 text-sm font-medium ${health === 'connected' ? 'text-emerald-400' : 'text-amber-300'}`}>{health}</p>
         </div>
-      </header>
+      </aside>
 
-      {/* Dashboard Layout */}
-      <main className="flex-1 p-8 grid grid-cols-1 md:grid-cols-12 gap-8 overflow-y-auto">
-        {/* Left Column: Statistics */}
-        <aside className="md:col-span-4 lg:col-span-3 flex flex-col gap-6">
-          <div className="bg-white/5 border border-white/10 rounded-3xl p-6">
-            <p className="text-xs font-bold uppercase tracking-widest text-[#FF6B00] mb-1">Monthly Total</p>
-            <h2 className="text-4xl font-light text-white">{calculateTotal().toFixed(2)} <span className="text-xl opacity-50">MAD</span></h2>
-            <div className="mt-4 flex items-center gap-2 text-green-400 text-sm">
-              <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
-              </svg>
-              <span>12% from last month</span>
+      <div className="lg:pl-72">
+        <header className="sticky top-0 z-10 border-b border-white/10 bg-[#080808]/80 px-4 py-4 backdrop-blur-xl md:px-8">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.28em] text-orange-400">Moroccan finance dashboard</p>
+              <h2 className="mt-1 text-2xl font-semibold md:text-3xl">
+                {page === 'dashboard' ? 'Receipt control center' : page === 'analytics' ? 'Expense analytics' : 'Workspace settings'}
+              </h2>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={fetchReceipts}
+                disabled={loading}
+                className="flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 text-sm text-slate-200 transition hover:bg-white/10 disabled:opacity-60"
+              >
+                <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+                Refresh
+              </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                className="flex h-10 items-center gap-2 rounded-lg bg-orange-500 px-4 text-sm font-bold text-black transition hover:bg-orange-400 disabled:opacity-60"
+              >
+                {uploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
+                Upload
+              </button>
             </div>
           </div>
+        </header>
 
-          <div className="bg-white/5 border border-white/10 rounded-3xl p-6">
-            <p className="text-xs font-bold uppercase tracking-widest text-gray-400 mb-1">TVA Récupérable</p>
-            <h2 className="text-3xl font-medium text-white">{calculateTVA().toFixed(2)} <span className="text-lg opacity-50">MAD</span></h2>
-            <div className="w-full bg-white/10 h-1.5 rounded-full mt-4 overflow-hidden">
-              <div className="bg-[#FF6B00] h-full" style={{ width: '65%' }}></div>
-            </div>
-            <p className="text-[11px] text-gray-500 mt-2">65% of deductible limit reached</p>
-          </div>
-
-          {receipts.length > 0 && (
-            <div className="bg-white/5 border border-white/10 rounded-3xl p-6">
-              <p className="text-xs font-bold uppercase tracking-widest text-gray-400 mb-4">Spending by Category</p>
-              <div className="h-48 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={categoryData}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={60}
-                      outerRadius={80}
-                      paddingAngle={5}
-                      dataKey="value"
-                      stroke="none"
-                    >
-                      {categoryData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip 
-                      formatter={(value: number) => [`${value.toFixed(2)}`, 'Amount']}
-                      contentStyle={{ backgroundColor: '#1A1A1A', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', color: '#fff' }}
-                      itemStyle={{ color: '#fff' }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          )}
-
-          <div className="flex-1 bg-white/5 border border-white/10 rounded-3xl p-6 overflow-y-auto max-h-[600px] no-scrollbar">
-            <h3 className="text-sm font-semibold mb-4 flex items-center gap-2">
-              <span className="w-1.5 h-4 bg-[#FF6B00] rounded-full"></span>
-              Recent Extractions
-            </h3>
-            <div className="space-y-4">
-              {receipts.length === 0 ? (
-                <p className="text-sm text-gray-500">No receipts found. Upload one to get started.</p>
-              ) : receipts.map(receipt => (
-                 <div 
-                   key={receipt.id} 
-                   onClick={() => setSelectedReceipt(receipt)}
-                   className={`flex items-center justify-between p-3 rounded-2xl cursor-pointer transition-colors ${selectedReceipt?.id === receipt.id ? 'bg-white/10 border border-white/10' : 'bg-white/5 hover:bg-white/10'}`}
-                 >
-                   <div className="flex flex-col">
-                     <span className="text-sm font-medium">{receipt.merchant || 'Unknown Merchant'}</span>
-                     <span className="text-[10px] text-gray-500">{receipt.date} • {receipt.category}</span>
-                   </div>
-                   <span className="text-sm font-bold">{receipt.total?.toFixed(2) || '0.00'} {receipt.currency || 'DH'}</span>
-                 </div>
-              ))}
-            </div>
-          </div>
-        </aside>
-
-        {/* Right Column: Workspace */}
-        <div className="md:col-span-8 lg:col-span-9 flex flex-col gap-6">
+        <main className={`px-4 py-6 md:px-8 ${settings.compactMode ? 'space-y-4' : 'space-y-6'}`}>
           {error && (
-            <div className="bg-red-500/10 border border-red-500/50 text-red-500 p-4 rounded-xl text-sm whitespace-pre-wrap">
-              {error}
+            <div className="flex items-start gap-3 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
+              <X size={18} className="mt-0.5 shrink-0" />
+              <span>{error}</span>
             </div>
           )}
-          
-          <div 
-            onClick={() => fileInputRef.current?.click()}
-            className="relative group flex flex-col items-center justify-center border-2 border-dashed border-white/10 hover:border-[#FF6B00]/40 bg-white/[0.02] rounded-3xl p-12 transition-all cursor-pointer overflow-hidden"
-          >
-            <input 
-              type="file" 
-              accept="image/*,application/pdf" 
-              className="hidden" 
-              ref={fileInputRef} 
-              onChange={handleFileUpload} 
-              disabled={isUploading}
-            />
-            <div className="absolute inset-0 bg-[#FF6B00]/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
-            <div className="w-14 h-14 rounded-full bg-[#FF6B00]/10 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-              {isUploading ? (
-                <div className="w-6 h-6 border-2 border-[#FF6B00] border-t-transparent rounded-full animate-spin"></div>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" className="w-7 h-7 text-[#FF6B00]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                </svg>
-              )}
-            </div>
-            <p className="text-lg font-medium text-white group-hover:text-[#FF6B00] transition-colors">{isUploading ? 'Extracting via AI...' : 'Drag & drop or tap to scan'}</p>
-            <p className="text-sm text-gray-500 mt-1">Supports JPG, PNG or PDF files</p>
-          </div>
 
-          <div className="flex-1 bg-white/5 border border-white/10 rounded-3xl p-8 flex flex-col">
-            {selectedReceipt ? (
-              <>
-                <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between mb-8 gap-4">
-                  <div>
-                    <span className="px-3 py-1 bg-green-500/10 text-green-500 text-[10px] font-bold uppercase tracking-wider rounded-full">AI Processed Successfully</span>
-                    <h3 className="text-2xl font-bold mt-4 text-white">{selectedReceipt.merchant || 'Unknown Merchant'}</h3>
-                    <p className="text-gray-500 text-sm mt-1">Transaction Ref: {selectedReceipt.id.substring(0, 8).toUpperCase()} • {selectedReceipt.date}</p>
-                  </div>
-                  <button onClick={downloadPDF} className="px-5 py-2.5 bg-[#FF6B00]/10 hover:bg-[#FF6B00]/20 text-[#FF6B00] border border-[#FF6B00]/20 rounded-xl text-sm font-medium transition-colors cursor-pointer w-full lg:w-auto">Download as PDF</button>
+          {page === 'dashboard' && (
+            <>
+              <section className="grid grid-cols-1 gap-3 xl:grid-cols-[1.5fr_1fr_1fr_1fr]">
+                <Kpi title="Monthly Total" value={money(totals.total, settings.defaultCurrency)} icon={CircleDollarSign} />
+                <Kpi title={settings.vatLabel} value={money(totals.tva, settings.defaultCurrency)} icon={FileText} />
+                <Kpi title="Pending" value={String(totals.counts['Pending Approval'] || 0)} icon={SlidersHorizontal} />
+                <Kpi title="Approved" value={String(totals.counts.Approved || 0)} icon={Check} />
+              </section>
+
+              <FilterBar filters={filters} setFilters={setFilters} />
+
+              <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_390px]">
+                <div className="space-y-6">
+                  <UploadZone uploading={uploading} onPick={() => fileInputRef.current?.click()} />
+                  <ReceiptTable
+                    receipts={receipts}
+                    selectedId={selectedReceipt?.id}
+                    loading={loading}
+                    currency={settings.defaultCurrency}
+                    onSelect={receipt => {
+                      setSelectedReceipt(receipt);
+                      setEditForm(null);
+                    }}
+                  />
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
-                  <div className="space-y-6">
-                    <div>
-                      <p className="text-[10px] uppercase font-bold text-gray-500 mb-1">Category</p>
-                      <p className="text-sm font-medium">{selectedReceipt.category || 'Uncategorized'}</p>
-                    </div>
-                    <div>
-                      <p className="text-[10px] uppercase font-bold text-gray-500 mb-1">Status</p>
-                      <p className="text-sm font-medium flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.5)]"></span>
-                        {selectedReceipt.status || 'Pending'}
-                      </p>
-                    </div>
-                  </div>
-                  
-                  {selectedReceipt.insight && (
-                    <div className="lg:col-span-2 bg-black/40 rounded-2xl p-5 border border-white/5 flex flex-col justify-center">
-                      <div className="flex items-center gap-3 mb-4">
-                        <div className="w-6 h-6 rounded-md bg-[#FF6B00] flex items-center justify-center shadow-lg shadow-[#FF6B00]/20">
-                          <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5 text-black" viewBox="0 0 20 20" fill="currentColor">
-                            <path d="M11 3a1 1 0 10-2 0v1a1 1 0 102 0V3zM15.657 5.757a1 1 0 00-1.414-1.414l-.707.707a1 1 0 001.414 1.414l.707-.707zM18 10a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM5.05 6.464A1 1 0 106.464 5.05l-.707-.707a1 1 0 00-1.414 1.414l.707.707zM5 10a1 1 0 01-1 1H3a1 1 0 110-2h1a1 1 0 011 1zM8 16v-1a1 1 0 112 0v1a1 1 0 11-2 0zM13.536 14.243a1 1 0 011.414 1.414l-.707.707a1 1 0 01-1.414-1.414l.707-.707zM16 18a1 1 0 100-2 1 1 0 000 2z" />
-                          </svg>
-                        </div>
-                        <p className="text-xs font-bold uppercase tracking-wide text-[#FF6B00]">Gemini AI Insight</p>
-                      </div>
-                      <p className="text-sm leading-relaxed text-gray-300 italic">"{selectedReceipt.insight}"</p>
-                    </div>
-                  )}
-                </div>
+                <DetailsPanel
+                  receipt={selectedReceipt}
+                  editForm={editForm}
+                  setEditForm={setEditForm}
+                  onApprove={() => updateStatus('Approved')}
+                  onReject={() => updateStatus('Rejected')}
+                  onPending={() => updateStatus('Pending Approval')}
+                  onDelete={deleteReceipt}
+                  onExport={exportPdf}
+                  onSave={() => selectedReceipt && editForm && updateReceipt(selectedReceipt.id, editForm)}
+                  setForm={setEditForm}
+                  saving={saving}
+                />
+              </section>
 
-                {/* TVA Breakdown */}
-                <div className="mt-auto flex flex-col sm:flex-row items-start sm:items-end justify-between border-t border-white/5 pt-6 gap-6 sm:gap-0">
-                  <div className="flex gap-8 sm:gap-12 w-full sm:w-auto">
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">Montant HT</p>
-                      <p className="text-xl font-medium text-white">{selectedReceipt.ht ? selectedReceipt.ht.toFixed(2) : '---'} <span className="text-sm opacity-40">{selectedReceipt.currency || 'DH'}</span></p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">TVA (20%)</p>
-                      <p className="text-xl font-medium text-white">{selectedReceipt.tva ? selectedReceipt.tva.toFixed(2) : '---'} <span className="text-sm opacity-40">{selectedReceipt.currency || 'DH'}</span></p>
-                    </div>
-                  </div>
-                  <div className="text-left sm:text-right w-full sm:w-auto">
-                    <p className="text-xs text-[#FF6B00] font-bold mb-1 tracking-wider">TOTAL TTC</p>
-                    <p className="text-4xl font-bold text-white">{selectedReceipt.total ? selectedReceipt.total.toFixed(2) : '---'} <span className="text-lg opacity-40">{selectedReceipt.currency || 'DH'}</span></p>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="flex items-center justify-center h-full text-gray-500">
-                <p>Select or scan a receipt to view details</p>
+              <section className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                <ChartCard title="Spending by Category" empty={!categoryData.length}>
+                  <ResponsiveContainer width="100%" height={270}>
+                    <PieChart>
+                      <Pie data={categoryData} innerRadius={70} outerRadius={100} dataKey="value" paddingAngle={4}>
+                        {categoryData.map((entry, index) => <Cell key={entry.name} fill={chartColors[index % chartColors.length]} />)}
+                      </Pie>
+                      <Tooltip formatter={(value: number) => money(value, settings.defaultCurrency)} contentStyle={tooltipStyle} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </ChartCard>
+                <ChartCard title="Recent Category Totals" empty={!categoryData.length}>
+                  <ResponsiveContainer width="100%" height={270}>
+                    <BarChart data={categoryData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+                      <XAxis dataKey="name" stroke="#94A3B8" fontSize={12} />
+                      <YAxis stroke="#94A3B8" fontSize={12} />
+                      <Tooltip formatter={(value: number) => money(value, settings.defaultCurrency)} contentStyle={tooltipStyle} />
+                      <Bar dataKey="value" radius={[6, 6, 0, 0]} fill="#F97316" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </ChartCard>
+              </section>
+            </>
+          )}
+
+          {page === 'analytics' && (
+            <section className="space-y-6">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                <Kpi title="Total expenses" value={money(totals.total, settings.defaultCurrency)} icon={CircleDollarSign} />
+                <Kpi title="TVA total" value={money(totals.tva, settings.defaultCurrency)} icon={FileText} />
+                <Kpi title="Average receipt" value={money(totals.average, settings.defaultCurrency)} icon={PieChartIcon} />
+                <Kpi title="Receipts" value={String(receipts.length)} icon={FileText} />
               </div>
-            )}
-          </div>
-        </div>
-      </main>
+              <ChartCard title="Monthly Trend" empty={!monthlyTrend.length}>
+                <ResponsiveContainer width="100%" height={320}>
+                  <AreaChart data={monthlyTrend}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+                    <XAxis dataKey="month" stroke="#94A3B8" fontSize={12} />
+                    <YAxis stroke="#94A3B8" fontSize={12} />
+                    <Tooltip formatter={(value: number) => money(value, settings.defaultCurrency)} contentStyle={tooltipStyle} />
+                    <Area type="monotone" dataKey="total" stroke="#F97316" fill="#F97316" fillOpacity={0.22} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </ChartCard>
+              <ChartCard title="Category Breakdown" empty={!categoryData.length}>
+                <ResponsiveContainer width="100%" height={320}>
+                  <BarChart data={categoryData} layout="vertical">
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+                    <XAxis type="number" stroke="#94A3B8" fontSize={12} />
+                    <YAxis type="category" dataKey="name" stroke="#94A3B8" width={90} fontSize={12} />
+                    <Tooltip formatter={(value: number) => money(value, settings.defaultCurrency)} contentStyle={tooltipStyle} />
+                    <Bar dataKey="value" radius={[0, 6, 6, 0]} fill="#14B8A6" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </ChartCard>
+            </section>
+          )}
 
-      {/* Sticky Mobile-vibe Actions Dock */}
-      <footer className="px-8 py-6 pb-8 flex justify-center fixed bottom-0 w-full pointer-events-none">
-        <div className="bg-[#1A1A1A] border border-white/10 px-8 py-3 rounded-full flex items-center gap-10 shadow-2xl pointer-events-auto">
-          <button className="text-[#FF6B00] hover:scale-110 transition-transform cursor-pointer">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-            </svg>
+          {page === 'settings' && (
+            <section className="max-w-3xl rounded-lg border border-white/10 bg-white/[0.05] p-6 shadow-2xl shadow-black/20 backdrop-blur">
+              <h3 className="text-lg font-semibold">Dashboard preferences</h3>
+              <div className="mt-6 grid gap-5">
+                <label className="grid gap-2 text-sm">
+                  <span className="text-slate-400">Default currency</span>
+                  <input
+                    value={settings.defaultCurrency}
+                    onChange={event => setSettings(prev => ({ ...prev, defaultCurrency: event.target.value.toUpperCase() || 'MAD' }))}
+                    className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 outline-none focus:border-orange-500"
+                  />
+                </label>
+                <label className="grid gap-2 text-sm">
+                  <span className="text-slate-400">VAT label</span>
+                  <input
+                    value={settings.vatLabel}
+                    onChange={event => setSettings(prev => ({ ...prev, vatLabel: event.target.value }))}
+                    className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 outline-none focus:border-orange-500"
+                  />
+                </label>
+                <label className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 p-4 text-sm">
+                  <span>
+                    <span className="block font-medium">Compact dashboard</span>
+                    <span className="text-slate-500">Reduce vertical spacing for dense accounting work.</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={settings.compactMode}
+                    onChange={event => setSettings(prev => ({ ...prev, compactMode: event.target.checked }))}
+                    className="h-5 w-5 accent-orange-500"
+                  />
+                </label>
+              </div>
+            </section>
+          )}
+        </main>
+      </div>
+
+      <footer className="fixed bottom-0 left-0 right-0 z-30 border-t border-white/10 bg-black/80 px-4 py-3 backdrop-blur-xl lg:hidden">
+        <div className="mx-auto flex max-w-md items-center justify-between">
+          {navItems.slice(0, 2).map(item => {
+            const Icon = item.icon;
+            return (
+              <button key={item.page} onClick={() => setPage(item.page)} className={`rounded-lg p-3 ${page === item.page ? 'bg-orange-500 text-black' : 'text-slate-400'}`}>
+                <Icon size={21} />
+              </button>
+            );
+          })}
+          <button onClick={() => fileInputRef.current?.click()} className="rounded-full bg-orange-500 p-4 text-black shadow-lg shadow-orange-500/30">
+            <Upload size={22} />
           </button>
-          <button className="text-gray-500 hover:text-gray-200 hover:scale-110 transition-all cursor-pointer">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
-            </svg>
-          </button>
-          <div 
-             onClick={() => fileInputRef.current?.click()}
-             className="w-10 h-10 bg-[#FF6B00] rounded-full flex items-center justify-center transform hover:scale-110 cursor-pointer shadow-[0_0_20px_rgba(255,107,0,0.4)] transition-all"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-black" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-            </svg>
-          </div>
-          <button className="text-gray-500 hover:text-gray-200 hover:scale-110 transition-all cursor-pointer">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" />
-            </svg>
-          </button>
-          <button className="text-gray-500 hover:text-gray-200 hover:scale-110 transition-all cursor-pointer">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
+          <button onClick={() => setPage('settings')} className={`rounded-lg p-3 ${page === 'settings' ? 'bg-orange-500 text-black' : 'text-slate-400'}`}>
+            <Settings size={21} />
           </button>
         </div>
       </footer>
+    </div>
+  );
+}
+
+const tooltipStyle = {
+  backgroundColor: '#111',
+  border: '1px solid rgba(255,255,255,0.12)',
+  borderRadius: '8px',
+  color: '#fff',
+};
+
+function Kpi({ title, value, icon: Icon }: { title: string; value: string; icon: React.ElementType }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[0.05] p-5 shadow-2xl shadow-black/20 backdrop-blur">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs uppercase tracking-wide text-slate-500">{title}</p>
+        <Icon size={18} className="text-orange-400" />
+      </div>
+      <p className="mt-3 break-words text-2xl font-semibold text-white">{value}</p>
+    </div>
+  );
+}
+
+function FilterBar({ filters, setFilters }: { filters: ReceiptFilters; setFilters: React.Dispatch<React.SetStateAction<ReceiptFilters>> }) {
+  return (
+    <section className="rounded-lg border border-white/10 bg-white/[0.04] p-4 backdrop-blur">
+      <div className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-300">
+        <Filter size={17} className="text-orange-400" />
+        Filters
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
+        <label className="relative xl:col-span-2">
+          <Search className="absolute left-3 top-3 text-slate-500" size={16} />
+          <input
+            value={filters.search}
+            onChange={event => setFilters(prev => ({ ...prev, search: event.target.value }))}
+            placeholder="Search merchant, status, category"
+            className="h-10 w-full rounded-lg border border-white/10 bg-black/30 pl-9 pr-3 text-sm outline-none focus:border-orange-500"
+          />
+        </label>
+        <input
+          type="month"
+          value={filters.month}
+          onChange={event => setFilters(prev => ({ ...prev, month: event.target.value }))}
+          className="h-10 rounded-lg border border-white/10 bg-black/30 px-3 text-sm outline-none focus:border-orange-500"
+        />
+        <select
+          value={filters.category}
+          onChange={event => setFilters(prev => ({ ...prev, category: event.target.value as ReceiptFilters['category'] }))}
+          className="h-10 rounded-lg border border-white/10 bg-black/30 px-3 text-sm outline-none focus:border-orange-500"
+        >
+          <option>All</option>
+          {categories.map(category => <option key={category}>{category}</option>)}
+        </select>
+        <select
+          value={filters.status}
+          onChange={event => setFilters(prev => ({ ...prev, status: event.target.value as ReceiptFilters['status'] }))}
+          className="h-10 rounded-lg border border-white/10 bg-black/30 px-3 text-sm outline-none focus:border-orange-500"
+        >
+          <option>All</option>
+          {statuses.map(status => <option key={status}>{status}</option>)}
+        </select>
+        <button
+          onClick={() => setFilters({ month: getCurrentMonth(), category: 'All', status: 'All', search: '', from: '', to: '' })}
+          className="h-10 rounded-lg border border-white/10 bg-white/5 px-3 text-sm transition hover:bg-white/10"
+        >
+          Reset
+        </button>
+      </div>
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+        <input
+          type="date"
+          value={filters.from}
+          onChange={event => setFilters(prev => ({ ...prev, from: event.target.value }))}
+          className="h-10 rounded-lg border border-white/10 bg-black/30 px-3 text-sm outline-none focus:border-orange-500"
+        />
+        <input
+          type="date"
+          value={filters.to}
+          onChange={event => setFilters(prev => ({ ...prev, to: event.target.value }))}
+          className="h-10 rounded-lg border border-white/10 bg-black/30 px-3 text-sm outline-none focus:border-orange-500"
+        />
+      </div>
+    </section>
+  );
+}
+
+function UploadZone({ uploading, onPick }: { uploading: boolean; onPick: () => void }) {
+  return (
+    <button
+      onClick={onPick}
+      disabled={uploading}
+      className="group flex min-h-44 w-full flex-col items-center justify-center rounded-lg border-2 border-dashed border-white/10 bg-white/[0.03] p-8 text-center transition hover:border-orange-500/70 hover:bg-orange-500/5 disabled:opacity-70"
+    >
+      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-orange-500/15 text-orange-400 transition group-hover:scale-105">
+        {uploading ? <Loader2 className="animate-spin" size={26} /> : <Upload size={26} />}
+      </div>
+      <p className="mt-4 text-lg font-semibold">{uploading ? 'Extracting receipt data...' : 'Upload JPG, PNG, or PDF receipt'}</p>
+      <p className="mt-1 text-sm text-slate-500">Gemini extracts structured data and saves it to Supabase.</p>
+    </button>
+  );
+}
+
+function ReceiptTable({
+  receipts,
+  selectedId,
+  loading,
+  currency,
+  onSelect,
+}: {
+  receipts: Receipt[];
+  selectedId?: string;
+  loading: boolean;
+  currency: string;
+  onSelect: (receipt: Receipt) => void;
+}) {
+  if (loading) {
+    return (
+      <div className="flex min-h-72 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04]">
+        <Loader2 className="animate-spin text-orange-400" />
+      </div>
+    );
+  }
+
+  if (!receipts.length) {
+    return (
+      <div className="flex min-h-72 flex-col items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] p-8 text-center">
+        <FileText size={34} className="text-slate-500" />
+        <p className="mt-3 text-lg font-semibold">No receipts found</p>
+        <p className="mt-1 max-w-md text-sm text-slate-500">Upload a receipt or adjust filters to populate the dashboard with real Supabase data.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.04]">
+      <div className="grid grid-cols-[1.2fr_0.8fr_0.7fr_0.7fr_32px] gap-3 border-b border-white/10 px-4 py-3 text-xs uppercase tracking-wide text-slate-500">
+        <span>Merchant</span>
+        <span>Category</span>
+        <span>Status</span>
+        <span className="text-right">Total</span>
+        <span />
+      </div>
+      {receipts.map(receipt => (
+        <button
+          key={receipt.id}
+          onClick={() => onSelect(receipt)}
+          className={`grid w-full grid-cols-[1.2fr_0.8fr_0.7fr_0.7fr_32px] items-center gap-3 border-b border-white/5 px-4 py-4 text-left text-sm transition last:border-0 ${
+            selectedId === receipt.id ? 'bg-orange-500/10' : 'hover:bg-white/[0.06]'
+          }`}
+        >
+          <span className="min-w-0">
+            <span className="block truncate font-medium">{receipt.merchant || 'Unknown merchant'}</span>
+            <span className="block truncate text-xs text-slate-500">{receipt.date || receipt.created_at?.slice(0, 10)} • {receipt.transaction_ref || receipt.id.slice(0, 8)}</span>
+          </span>
+          <span className="truncate text-slate-300">{receipt.category}</span>
+          <StatusPill status={receipt.status} />
+          <span className="text-right font-semibold">{money(receipt.total, receipt.currency || currency)}</span>
+          <ChevronRight size={17} className="text-slate-500" />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function DetailsPanel({
+  receipt,
+  editForm,
+  setEditForm,
+  onApprove,
+  onReject,
+  onPending,
+  onDelete,
+  onExport,
+  onSave,
+  setForm,
+  saving,
+}: {
+  receipt: Receipt | null;
+  editForm: ReceiptFormState | null;
+  setEditForm: (form: ReceiptFormState | null) => void;
+  onApprove: () => void;
+  onReject: () => void;
+  onPending: () => void;
+  onDelete: () => void;
+  onExport: () => void;
+  onSave: () => void;
+  setForm: React.Dispatch<React.SetStateAction<ReceiptFormState | null>>;
+  saving: boolean;
+}) {
+  if (!receipt) {
+    return (
+      <aside className="flex min-h-[520px] flex-col items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] p-8 text-center">
+        <FileText size={34} className="text-slate-500" />
+        <p className="mt-3 text-lg font-semibold">Select a receipt</p>
+        <p className="mt-1 text-sm text-slate-500">Receipt details, approval workflow, edits, and PDF export will appear here.</p>
+      </aside>
+    );
+  }
+
+  const form = editForm;
+  return (
+    <aside className="rounded-lg border border-white/10 bg-white/[0.05] p-5 shadow-2xl shadow-black/20 backdrop-blur">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <StatusPill status={receipt.status} />
+          <h3 className="mt-3 truncate text-2xl font-semibold">{receipt.merchant || 'Unknown merchant'}</h3>
+          <p className="mt-1 text-sm text-slate-500">{receipt.date || 'No date'} • {receipt.transaction_ref || receipt.id.slice(0, 8)}</p>
+        </div>
+        <button onClick={() => setEditForm(form ? null : receiptToForm(receipt))} className="rounded-lg border border-white/10 bg-white/5 p-2 transition hover:bg-white/10">
+          <Pencil size={17} />
+        </button>
+      </div>
+
+      {form ? (
+        <div className="mt-5 grid gap-3">
+          <Field label="Merchant" value={form.merchant} onChange={value => setForm(prev => prev && { ...prev, merchant: value })} />
+          <Field label="Transaction Ref" value={form.transaction_ref} onChange={value => setForm(prev => prev && { ...prev, transaction_ref: value })} />
+          <Field label="Date" value={form.date} onChange={value => setForm(prev => prev && { ...prev, date: value })} />
+          <select value={form.category} onChange={event => setForm(prev => prev && { ...prev, category: event.target.value as ReceiptCategory })} className="h-10 rounded-lg border border-white/10 bg-black/30 px-3 text-sm outline-none focus:border-orange-500">
+            {categories.map(category => <option key={category}>{category}</option>)}
+          </select>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Total" value={form.total} onChange={value => setForm(prev => prev && { ...prev, total: value })} />
+            <Field label="Currency" value={form.currency} onChange={value => setForm(prev => prev && { ...prev, currency: value.toUpperCase() })} />
+            <Field label="HT" value={form.ht} onChange={value => setForm(prev => prev && { ...prev, ht: value })} />
+            <Field label="TVA" value={form.tva} onChange={value => setForm(prev => prev && { ...prev, tva: value })} />
+          </div>
+          <textarea
+            value={form.insight}
+            onChange={event => setForm(prev => prev && { ...prev, insight: event.target.value })}
+            rows={4}
+            className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none focus:border-orange-500"
+          />
+          <div className="grid grid-cols-2 gap-3">
+            <button onClick={() => setEditForm(null)} className="h-10 rounded-lg border border-white/10 bg-white/5 text-sm transition hover:bg-white/10">Cancel</button>
+            <button onClick={onSave} disabled={saving} className="h-10 rounded-lg bg-orange-500 text-sm font-bold text-black transition hover:bg-orange-400 disabled:opacity-60">
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="mt-6 grid grid-cols-2 gap-3">
+            <Detail label="Category" value={receipt.category} />
+            <Detail label="Currency" value={receipt.currency || 'MAD'} />
+            <Detail label="Montant HT" value={money(receipt.ht, receipt.currency || 'MAD')} />
+            <Detail label="TVA" value={money(receipt.tva, receipt.currency || 'MAD')} />
+          </div>
+          <div className="mt-5 rounded-lg border border-orange-500/20 bg-orange-500/10 p-4">
+            <p className="text-xs uppercase tracking-wide text-orange-300">Total TTC</p>
+            <p className="mt-1 text-3xl font-bold">{money(receipt.total, receipt.currency || 'MAD')}</p>
+          </div>
+          {receipt.insight && (
+            <div className="mt-4 rounded-lg border border-white/10 bg-black/25 p-4">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Gemini insight</p>
+              <p className="mt-2 text-sm leading-6 text-slate-300">{receipt.insight}</p>
+            </div>
+          )}
+          <div className="mt-5 grid grid-cols-3 gap-2">
+            <button onClick={onApprove} disabled={saving} className="rounded-lg bg-emerald-500/15 px-3 py-2 text-sm text-emerald-300 transition hover:bg-emerald-500/25">Approve</button>
+            <button onClick={onReject} disabled={saving} className="rounded-lg bg-red-500/15 px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/25">Reject</button>
+            <button onClick={onPending} disabled={saving} className="rounded-lg bg-sky-500/15 px-3 py-2 text-sm text-sky-300 transition hover:bg-sky-500/25">Pending</button>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <button onClick={onExport} className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm transition hover:bg-white/10">
+              <Download size={16} />
+              Export PDF
+            </button>
+            <button onClick={onDelete} disabled={saving} className="flex items-center justify-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/20">
+              <Trash2 size={16} />
+              Delete
+            </button>
+          </div>
+        </>
+      )}
+    </aside>
+  );
+}
+
+function Field({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="grid gap-1 text-xs text-slate-500">
+      {label}
+      <input value={value} onChange={event => onChange(event.target.value)} className="h-10 rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-slate-100 outline-none focus:border-orange-500" />
+    </label>
+  );
+}
+
+function Detail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className="mt-1 break-words text-sm font-medium">{value}</p>
+    </div>
+  );
+}
+
+function StatusPill({ status }: { status: ReceiptStatus }) {
+  const styles: Record<ReceiptStatus, string> = {
+    Approved: 'bg-emerald-500/15 text-emerald-300',
+    Rejected: 'bg-red-500/15 text-red-300',
+    'Pending Approval': 'bg-sky-500/15 text-sky-300',
+  };
+  return <span className={`inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-medium ${styles[status]}`}>{status}</span>;
+}
+
+function ChartCard({ title, empty, children }: { title: string; empty: boolean; children: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[0.04] p-5">
+      <h3 className="text-base font-semibold">{title}</h3>
+      <div className="mt-4">
+        {empty ? (
+          <div className="flex h-[270px] items-center justify-center text-sm text-slate-500">No receipt data available.</div>
+        ) : children}
+      </div>
     </div>
   );
 }

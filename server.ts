@@ -1,18 +1,36 @@
 import express from 'express';
 import path from 'path';
+import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI } from '@google/genai';
+import { jsPDF } from 'jspdf';
 import dotenv from 'dotenv';
 
+dotenv.config({ path: '.env.local' });
 dotenv.config();
 
 const app = express();
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '2mb' }));
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
+const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf']);
+const CATEGORIES = ['Meals', 'Transport', 'Software', 'Office', 'Fuel', 'Travel', 'Utilities', 'Other'];
+const STATUSES = ['Pending Approval', 'Approved', 'Rejected'];
 
-// Initialize Supabase client lazily
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+  fileFilter: (_req, file, cb) => {
+    if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      cb(new Error('Invalid file type. Upload a JPG, PNG, or PDF receipt.'));
+      return;
+    }
+    cb(null, true);
+  },
+});
+
 let supabase: ReturnType<typeof createClient> | null = null;
 function getSupabase() {
   if (!supabase) {
@@ -26,7 +44,6 @@ function getSupabase() {
   return supabase;
 }
 
-// Initialize Gemini client lazily
 let ai: GoogleGenAI | null = null;
 function getAI() {
   if (!ai) {
@@ -39,111 +56,341 @@ function getAI() {
   return ai;
 }
 
-// API Routes
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
+function parseMoney(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const cleaned = String(value)
+    .replace(/\s/g, '')
+    .replace(/[^\d,.-]/g, '')
+    .replace(/,(?=\d{1,2}$)/, '.')
+    .replace(/,/g, '');
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeCurrency(value: unknown): string {
+  const currency = String(value || 'MAD').trim().toUpperCase();
+  if (['DH', 'DHS', 'MAD', 'MAD.'].includes(currency)) return 'MAD';
+  return currency || 'MAD';
+}
+
+function normalizeCategory(value: unknown): string {
+  const raw = String(value || '').trim().toLowerCase();
+  const match = CATEGORIES.find(category => category.toLowerCase() === raw);
+  return match || 'Other';
+}
+
+function normalizeStatus(value: unknown): string {
+  const raw = String(value || '').trim();
+  return STATUSES.includes(raw) ? raw : 'Pending Approval';
+}
+
+function normalizeReceipt(payload: Record<string, unknown>, file?: Express.Multer.File) {
+  return {
+    merchant: payload.merchant ? String(payload.merchant).trim() : null,
+    transaction_ref: payload.transaction_ref ? String(payload.transaction_ref).trim() : null,
+    date: payload.date ? String(payload.date).trim() : null,
+    category: normalizeCategory(payload.category),
+    total: parseMoney(payload.total),
+    currency: normalizeCurrency(payload.currency),
+    ht: parseMoney(payload.ht),
+    tva: parseMoney(payload.tva),
+    insight: payload.insight ? String(payload.insight).trim() : null,
+    status: normalizeStatus(payload.status),
+    file_name: file?.originalname || null,
+    file_type: file?.mimetype || null,
+  };
+}
+
+function parseReceiptDate(dateText: string | null | undefined): Date | null {
+  if (!dateText) return null;
+  const direct = new Date(dateText);
+  if (!Number.isNaN(direct.getTime())) return direct;
+  const match = dateText.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/);
+  if (!match) return null;
+  const first = Number(match[1]);
+  const second = Number(match[2]);
+  const year = Number(match[3].length === 2 ? `20${match[3]}` : match[3]);
+  const day = first > 12 ? first : second;
+  const month = first > 12 ? second : first;
+  const parsed = new Date(year, month - 1, day);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function matchesDateFilters(receipt: any, month?: string, from?: string, to?: string) {
+  if (!month && !from && !to) return true;
+  const parsed = parseReceiptDate(receipt.date) || parseReceiptDate(receipt.created_at);
+  if (!parsed) return false;
+
+  if (month) {
+    const normalizedMonth = month.length === 7 ? month : month.slice(0, 7);
+    const receiptMonth = `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}`;
+    if (receiptMonth !== normalizedMonth) return false;
+  }
+
+  if (from) {
+    const fromDate = new Date(from);
+    if (!Number.isNaN(fromDate.getTime()) && parsed < fromDate) return false;
+  }
+
+  if (to) {
+    const toDate = new Date(to);
+    if (!Number.isNaN(toDate.getTime())) {
+      toDate.setHours(23, 59, 59, 999);
+      if (parsed > toDate) return false;
+    }
+  }
+
+  return true;
+}
+
+function getPublicReceipt(receipt: any) {
+  return {
+    ...receipt,
+    total: receipt.total === null ? null : Number(receipt.total),
+    ht: receipt.ht === null ? null : Number(receipt.ht),
+    tva: receipt.tva === null ? null : Number(receipt.tva),
+  };
+}
+
+app.get('/api/health', async (_req, res) => {
+  const env = {
+    supabaseUrl: Boolean(process.env.SUPABASE_URL),
+    supabaseServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+    geminiApiKey: Boolean(process.env.GEMINI_API_KEY),
+  };
+
+  let supabaseStatus = 'not_configured';
+  if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+    try {
+      const { error } = await getSupabase().from('receipts').select('id', { count: 'exact', head: true });
+      supabaseStatus = error ? `error: ${error.message}` : 'ok';
+    } catch (err: any) {
+      supabaseStatus = `error: ${err.message}`;
+    }
+  }
+
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    supabase: supabaseStatus,
+    env,
+  });
 });
 
 app.get('/api/receipts', async (req, res) => {
   try {
-    const client = getSupabase();
-    const { data, error } = await client
-      .from('receipts')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const { month, category, status, search, from, to } = req.query as Record<string, string | undefined>;
+    let query = getSupabase().from('receipts').select('*').order('created_at', { ascending: false });
 
-    if (error) {
-      return res.status(500).json({ error: error.message });
+    if (category && category !== 'All') query = query.eq('category', category);
+    if (status && status !== 'All') query = query.eq('status', status);
+    if (search) {
+      const term = `%${search}%`;
+      query = query.or(`merchant.ilike.${term},category.ilike.${term},date.ilike.${term},status.ilike.${term},transaction_ref.ilike.${term}`);
     }
 
-    res.json({ receipts: data });
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+
+    const receipts = (data || [])
+      .filter(receipt => matchesDateFilters(receipt, month, from, to))
+      .map(getPublicReceipt);
+
+    res.json({ receipts });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/receipts/process', async (req, res) => {
+app.get('/api/receipts/:id', async (req, res) => {
   try {
-    const { imageBase64, mimeType } = req.body;
-    if (!imageBase64 || !mimeType) {
-      return res.status(400).json({ error: 'Image data and mimeType are required' });
+    const { data, error } = await getSupabase().from('receipts').select('*').eq('id', req.params.id).single();
+    if (error) return res.status(404).json({ error: error.message });
+    res.json({ receipt: getPublicReceipt(data) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/receipts/process', upload.single('receipt'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'Receipt file is required.' });
+    if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      return res.status(400).json({ error: 'Invalid file type. Upload a JPG, PNG, or PDF receipt.' });
     }
 
-    const aiClient = getAI();
+    const aiResponse = await getAI().models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `You are ReceiptAI, a precise finance data extractor for Moroccan business receipts.
+Return ONLY one valid JSON object. Do not use markdown, comments, or extra text.
+Use null for missing fields. Numeric fields must be numbers, not strings.
+Normalize DH, DHS, and dirham to MAD when possible.
+The category must be exactly one of: Meals, Transport, Software, Office, Fuel, Travel, Utilities, Other.
 
-    let response;
-    let retries = 3;
-    while (retries > 0) {
-      try {
-        response = await aiClient.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: [
-                {
-                    role: 'user',
-                    parts: [
-                        {
-                            text: `Analyze this receipt. Extract the following information and output it as a JSON object:
-merchant: name of the store/merchant
-date: transaction date (e.g., 'Oct 26, 2023')
-category: inferred category (e.g., 'Transportation', 'Software', 'Meals')
-total: total amount as a number
-currency: currency abbreviation (e.g., 'USD', 'MAD', 'DH', 'EUR')
-ht: amount before tax (HT) as a number, if explicitly shown. Otherwise null.
-tva: total tax (TVA) as a number, if explicitly shown. Otherwise null.
-insight: a short 1-2 sentence AI insight about this expense (e.g., noting if it's high, unusual, or normal).
+Extract this schema:
+{
+  "merchant": string | null,
+  "transaction_ref": string | null,
+  "date": string | null,
+  "category": "Meals" | "Transport" | "Software" | "Office" | "Fuel" | "Travel" | "Utilities" | "Other",
+  "total": number | null,
+  "currency": string | null,
+  "ht": number | null,
+  "tva": number | null,
+  "insight": string | null,
+  "status": "Pending Approval"
+}`,
+            },
+            {
+              inlineData: {
+                data: file.buffer.toString('base64'),
+                mimeType: file.mimetype,
+              },
+            },
+          ],
+        },
+      ],
+    });
 
-Return ONLY valid JSON without markdown wrapping.`
-                        },
-                        {
-                            inlineData: {
-                                data: imageBase64,
-                                mimeType
-                            }
-                        }
-                    ]
-                }
-            ]
-        });
-        break; // Sucess, exit loop
-      } catch (err: any) {
-        retries--;
-        if (retries === 0) throw err;
-        await new Promise(res => setTimeout(res, 2000)); // wait 2 seconds before retry
-      }
-    }
-
-    const aiText = response?.text || '';
-    let parsedData;
+    const aiText = aiResponse.text || '';
+    let parsed: Record<string, unknown>;
     try {
-        const cleanedText = aiText.replace(/```json/g, '').replace(/```/g, '').trim();
-        parsedData = JSON.parse(cleanedText);
-    } catch (e) {
-        return res.status(500).json({ error: 'Failed to parse AI response as JSON', rawText: aiText });
+      parsed = JSON.parse(aiText.replace(/```json/g, '').replace(/```/g, '').trim());
+    } catch {
+      return res.status(502).json({ error: 'Gemini returned invalid JSON.', rawText: aiText });
     }
 
-    // Save to Supabase
-    const client = getSupabase();
-    const { data, error } = await client
+    const receiptPayload = normalizeReceipt({ ...parsed, status: 'Pending Approval' }, file);
+    const { data, error } = await getSupabase()
       .from('receipts')
-      .insert([{
-          merchant: parsedData.merchant,
-          date: parsedData.date,
-          category: parsedData.category,
-          total: parsedData.total,
-          currency: parsedData.currency,
-          ht: parsedData.ht || null,
-          tva: parsedData.tva || null,
-          insight: parsedData.insight,
-          status: 'Pending Approval'
-      }] as any)
+      .insert([receiptPayload] as any)
       .select()
       .single();
 
-    if (error) {
-      return res.status(500).json({ error: 'Failed to save to Supabase: ' + error.message });
+    if (error) return res.status(500).json({ error: `Failed to save to Supabase: ${error.message}` });
+    res.json({ receipt: getPublicReceipt(data) });
+  } catch (err: any) {
+    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File is too large. Maximum size is 12MB.' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/receipts/:id', async (req, res) => {
+  try {
+    const allowed = ['merchant', 'transaction_ref', 'date', 'category', 'total', 'currency', 'ht', 'tva', 'insight', 'status'];
+    const updates: Record<string, unknown> = {};
+    for (const key of allowed) {
+      if (key in req.body) updates[key] = req.body[key];
+    }
+    const normalized = normalizeReceipt(updates);
+    const payload = {
+      ...normalized,
+      file_name: undefined,
+      file_type: undefined,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await (getSupabase() as any)
+      .from('receipts')
+      .update(payload)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ receipt: getPublicReceipt(data) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/receipts/:id/status', async (req, res) => {
+  try {
+    const status = normalizeStatus(req.body.status);
+    if (!STATUSES.includes(status)) return res.status(400).json({ error: 'Invalid status.' });
+
+    const { data, error } = await (getSupabase() as any)
+      .from('receipts')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ receipt: getPublicReceipt(data) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/receipts/:id', async (req, res) => {
+  try {
+    const { error } = await getSupabase().from('receipts').delete().eq('id', req.params.id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/receipts/:id/export-pdf', async (req, res) => {
+  try {
+    const { data, error } = await getSupabase().from('receipts').select('*').eq('id', req.params.id).single();
+    if (error) return res.status(404).json({ error: error.message });
+
+    const receipt = getPublicReceipt(data);
+    const doc = new jsPDF();
+    const ref = (receipt.transaction_ref || receipt.id || '').slice(0, 12).toUpperCase();
+    const currency = receipt.currency || 'MAD';
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(22);
+    doc.text('ReceiptAI Summary', 20, 22);
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(90);
+    doc.text(`Generated ${new Date().toLocaleString()}`, 20, 30);
+
+    doc.setDrawColor(220);
+    doc.roundedRect(20, 42, 170, 104, 3, 3);
+    doc.setTextColor(0);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.text(receipt.merchant || 'Unknown merchant', 30, 58);
+
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Reference: ${ref || 'N/A'}`, 30, 68);
+    doc.text(`Date: ${receipt.date || 'N/A'}`, 30, 76);
+    doc.text(`Category: ${receipt.category || 'Other'}`, 30, 84);
+    doc.text(`Status: ${receipt.status || 'Pending Approval'}`, 30, 92);
+
+    doc.line(30, 102, 180, 102);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`HT: ${receipt.ht ?? '---'} ${currency}`, 30, 116);
+    doc.text(`TVA: ${receipt.tva ?? '---'} ${currency}`, 30, 126);
+    doc.setFontSize(15);
+    doc.text(`Total TTC: ${receipt.total ?? '---'} ${currency}`, 30, 138);
+
+    if (receipt.insight) {
+      doc.setFontSize(11);
+      doc.setFont('helvetica', 'normal');
+      doc.text(doc.splitTextToSize(`AI insight: ${receipt.insight}`, 20, { maxWidth: 170 }), 20, 164);
     }
 
-    res.json({ receipt: data });
+    const pdf = Buffer.from(doc.output('arraybuffer'));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="ReceiptAI_${ref || receipt.id}.pdf"`);
+    res.send(pdf);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -159,14 +406,18 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*all', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`ReceiptAI server running on http://localhost:${PORT}`);
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export { app };
