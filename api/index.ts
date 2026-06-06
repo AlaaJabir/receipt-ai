@@ -1,4 +1,4 @@
-import { app } from '../server';
+import { app } from '../server.js';
 
 export default function handler(req: any, res: any) {
   try {
