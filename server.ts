@@ -3,7 +3,6 @@ import path from 'path';
 import multer from 'multer';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI } from '@google/genai';
-import { jsPDF } from 'jspdf';
 import dotenv from 'dotenv';
 
 dotenv.config({ path: '.env.local' });
@@ -346,6 +345,7 @@ app.get('/api/receipts/:id/export-pdf', async (req, res) => {
     const { data, error } = await getSupabase().from('receipts').select('*').eq('id', req.params.id).single();
     if (error) return res.status(404).json({ error: error.message });
 
+    const { jsPDF } = await import('jspdf');
     const receipt = getPublicReceipt(data);
     const doc = new jsPDF();
     const ref = (receipt.transaction_ref || receipt.id || '').slice(0, 12).toUpperCase();
@@ -393,6 +393,18 @@ app.get('/api/receipts/:id/export-pdf', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('API request failed:', err);
+
+  if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(400).json({ error: 'File is too large. Maximum size is 12MB.' });
+  }
+
+  const message = err instanceof Error ? err.message : 'Internal server error.';
+  const status = message.startsWith('Invalid file type.') ? 400 : 500;
+  return res.status(status).json({ error: message });
 });
 
 async function startServer() {

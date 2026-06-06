@@ -1,24 +1,26 @@
 import { app } from '../server';
 
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
-
 export default function handler(req: any, res: any) {
-  const { path, ...query } = req.query || {};
-  const route = Array.isArray(path) ? path.join('/') : path || '';
-  const params = new URLSearchParams();
+  try {
+    const { path, ...query } = req.query || {};
+    const route = Array.isArray(path) ? path.join('/') : path || '';
+    const params = new URLSearchParams();
 
-  for (const [key, value] of Object.entries(query)) {
-    if (Array.isArray(value)) {
-      value.forEach(item => params.append(key, String(item)));
-    } else if (value !== undefined) {
-      params.set(key, String(value));
+    for (const [key, value] of Object.entries(query)) {
+      if (Array.isArray(value)) {
+        value.forEach(item => params.append(key, String(item)));
+      } else if (value !== undefined) {
+        params.set(key, String(value));
+      }
     }
-  }
 
-  req.url = `/api/${route}${params.toString() ? `?${params.toString()}` : ''}`;
-  return app(req, res);
+    req.url = `/api/${route}${params.toString() ? `?${params.toString()}` : ''}`;
+    return app(req, res);
+  } catch (error: any) {
+    console.error('Vercel API handler failed:', error);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: error?.message || 'Internal server error.' });
+    }
+    return res.end();
+  }
 }
