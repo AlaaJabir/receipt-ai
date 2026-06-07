@@ -100,6 +100,10 @@ function normalizeReceipt(payload: Record<string, unknown>, file?: Express.Multe
   };
 }
 
+function isMissingFileMetadataColumn(message: string): boolean {
+  return /(?:file_name|file_type).*(?:schema cache|column)|column.*(?:file_name|file_type)/i.test(message);
+}
+
 function parseReceiptDate(dateText: string | null | undefined): Date | null {
   if (!dateText) return null;
   const direct = new Date(dateText);
@@ -285,11 +289,22 @@ The status must be Pending Approval.`,
     }
 
     const receiptPayload = normalizeReceipt({ ...parsed, status: 'Pending Approval' }, file);
-    const { data, error } = await getSupabase()
+    let { data, error } = await getSupabase()
       .from('receipts')
       .insert([receiptPayload] as any)
       .select()
       .single();
+
+    if (error && isMissingFileMetadataColumn(error.message)) {
+      const { file_name: _fileName, file_type: _fileType, ...compatiblePayload } = receiptPayload;
+      const retry = await getSupabase()
+        .from('receipts')
+        .insert([compatiblePayload] as any)
+        .select()
+        .single();
+      data = retry.data;
+      error = retry.error;
+    }
 
     if (error) return res.status(500).json({ error: `Failed to save to Supabase: ${error.message}` });
     res.json({ receipt: getPublicReceipt(data) });

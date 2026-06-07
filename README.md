@@ -22,10 +22,11 @@ SUPABASE_SERVICE_ROLE_KEY=
 OPENAI_API_KEY=
 ```
 
-3. Run the Supabase migration:
+3. Run the Supabase migrations in filename order:
 
 ```sql
 supabase/migrations/20260604000000_create_receipts.sql
+supabase/migrations/20260607000000_add_receipt_file_metadata.sql
 ```
 
 You can paste it into the Supabase SQL editor or run it with the Supabase CLI.
