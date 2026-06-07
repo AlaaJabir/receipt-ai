@@ -510,6 +510,7 @@ app.get('/api/receipts/:id', async (req, res) => {
   try {
     const { data, error } = await getSupabase().from('receipts').select('*').eq('id', req.params.id).single();
     if (error) return res.status(404).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'Receipt not found.' });
     res.json({ receipt: getPublicReceipt(data) });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -755,55 +756,199 @@ app.get('/api/receipts/:id/export-pdf', async (req, res) => {
   try {
     const { data, error } = await getSupabase().from('receipts').select('*').eq('id', req.params.id).single();
     if (error) return res.status(404).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'Receipt not found.' });
+    const storedReceipt = data as unknown as Record<string, any>;
 
     const { jsPDF } = await import('jspdf');
-    const receipt = getPublicReceipt(data);
-    const doc = new jsPDF();
+    const query = req.query as Record<string, string | string[] | undefined>;
+    const queryText = (value: string | string[] | undefined, maxLength = 100) =>
+      String(Array.isArray(value) ? value[0] : value || '').trim().slice(0, maxLength);
+    const requestedCurrency = getDisplayCurrency(
+      queryText(query.display_currency, 3) || storedReceipt.display_currency || 'MAD',
+    );
+    if (!requestedCurrency) {
+      return res.status(400).json({ error: 'display_currency must be a 3-letter ISO currency code.' });
+    }
+
+    const rateMode = getConversionRateMode(queryText(query.conversion_rate_mode, 20));
+    const convertedReceipt = await ensureReceiptConversion(storedReceipt, requestedCurrency, rateMode);
+    const receipt = getPublicReceipt(convertedReceipt);
+    const companyName = queryText(query.company_name) || 'ReceiptAI';
+    const userName = queryText(query.user_name);
+    const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
     const ref = (receipt.transaction_ref || receipt.id || '').slice(0, 12).toUpperCase();
     const originalCurrency = receipt.original_currency || receipt.currency || 'MAD';
-    const displayCurrency = receipt.display_currency || 'MAD';
+    const displayCurrency = receipt.display_currency || requestedCurrency;
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 18;
+    const contentWidth = pageWidth - margin * 2;
+    const bottomMargin = 19;
+    let y = 0;
+
+    const formatAmount = (value: unknown, currency: string) => {
+      const amount = value === null || value === undefined ? null : Number(value);
+      if (amount === null || !Number.isFinite(amount)) return 'Unavailable';
+      return `${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+    };
+
+    const addPage = () => {
+      doc.addPage();
+      y = 22;
+    };
+
+    const ensureSpace = (height: number) => {
+      if (y + height > pageHeight - bottomMargin) addPage();
+    };
+
+    const sectionTitle = (title: string) => {
+      ensureSpace(14);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(249, 115, 22);
+      doc.text(title.toUpperCase(), margin, y);
+      doc.setDrawColor(229, 231, 235);
+      doc.line(margin, y + 3, pageWidth - margin, y + 3);
+      doc.setTextColor(17, 24, 39);
+      y += 10;
+    };
+
+    doc.setFillColor(17, 24, 39);
+    doc.rect(0, 0, pageWidth, 53, 'F');
+    doc.setFillColor(249, 115, 22);
+    doc.rect(0, 53, pageWidth, 2, 'F');
+
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(21);
+    const companyLines = doc.splitTextToSize(companyName, 112).slice(0, 2);
+    doc.text(companyLines, margin, 19);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(203, 213, 225);
+    const companyBlockHeight = companyLines.length * 7;
+    doc.text('EXPENSE RECEIPT REPORT', margin, 23 + companyBlockHeight);
+    if (userName) doc.text(`Prepared by ${userName}`, margin, 30 + companyBlockHeight);
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(22);
-    doc.text('ReceiptAI Summary', 20, 22);
     doc.setFontSize(11);
+    doc.setTextColor(255, 255, 255);
+    doc.text('RECEIPT SUMMARY', pageWidth - margin, 18, { align: 'right' });
     doc.setFont('helvetica', 'normal');
-    doc.setTextColor(90);
-    doc.text(`Generated ${new Date().toLocaleString()}`, 20, 30);
+    doc.setFontSize(8.5);
+    doc.setTextColor(203, 213, 225);
+    doc.text(`Generated ${new Date().toLocaleString('en-GB')}`, pageWidth - margin, 25, { align: 'right' });
+    doc.text(`Reference ${ref || 'N/A'}`, pageWidth - margin, 31, { align: 'right' });
 
-    doc.setDrawColor(220);
-    doc.roundedRect(20, 42, 170, 104, 3, 3);
-    doc.setTextColor(0);
+    y = 68;
+    sectionTitle('Receipt information');
+    const merchantLines = doc.splitTextToSize(receipt.merchant || 'Unknown merchant', contentWidth - 16);
+    const infoHeight = 27 + merchantLines.length * 6;
+    ensureSpace(infoHeight);
+    doc.setFillColor(248, 250, 252);
+    doc.setDrawColor(226, 232, 240);
+    doc.roundedRect(margin, y, contentWidth, infoHeight, 3, 3, 'FD');
+    doc.setTextColor(17, 24, 39);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(16);
-    doc.text(receipt.merchant || 'Unknown merchant', 30, 58);
-
-    doc.setFontSize(10);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Reference: ${ref || 'N/A'}`, 30, 68);
-    doc.text(`Date: ${receipt.date || 'N/A'}`, 30, 76);
-    doc.text(`Category: ${receipt.category || 'Other'}`, 30, 84);
-    doc.text(`Status: ${receipt.status || 'Pending Approval'}`, 30, 92);
-
-    doc.line(30, 102, 180, 102);
-    doc.setFont('helvetica', 'bold');
-    doc.text(`Original HT: ${receipt.original_ht ?? receipt.ht ?? '---'} ${originalCurrency}`, 30, 116);
-    doc.text(`Original TVA: ${receipt.original_tva ?? receipt.tva ?? '---'} ${originalCurrency}`, 30, 126);
     doc.setFontSize(15);
-    doc.text(`Original total: ${receipt.original_total ?? receipt.total ?? '---'} ${originalCurrency}`, 30, 138);
-    doc.setFontSize(11);
+    doc.text(merchantLines, margin + 8, y + 10);
+    const detailsY = y + 14 + merchantLines.length * 6;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(71, 85, 105);
+    doc.text(`Date: ${receipt.receipt_date || receipt.date || 'N/A'}`, margin + 8, detailsY);
+    doc.text(`Category: ${receipt.category || 'Other'}`, margin + 8, detailsY + 7);
+    doc.text(`Status: ${receipt.status || 'Pending Approval'}`, margin + contentWidth / 2, detailsY);
+    doc.text(`Reference: ${ref || 'N/A'}`, margin + contentWidth / 2, detailsY + 7);
+    y += infoHeight + 13;
+
+    sectionTitle('Financial summary');
+    const labelWidth = 35;
+    const amountWidth = (contentWidth - labelWidth) / 2;
+    const rowHeight = 13;
+    const tableHeight = rowHeight * 4;
+    ensureSpace(tableHeight);
+    doc.setFillColor(17, 24, 39);
+    doc.roundedRect(margin, y, contentWidth, rowHeight, 2, 2, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.text('AMOUNT', margin + 5, y + 8);
+    doc.text(`ORIGINAL (${originalCurrency})`, margin + labelWidth + 5, y + 8);
+    doc.text(`CONVERTED (${displayCurrency})`, margin + labelWidth + amountWidth + 5, y + 8);
+
+    const amountRows = [
+      ['HT', receipt.original_ht ?? receipt.ht, receipt.converted_ht],
+      ['TVA', receipt.original_tva ?? receipt.tva, receipt.converted_tva],
+      ['TOTAL', receipt.original_total ?? receipt.total, receipt.converted_total],
+    ] as const;
+    amountRows.forEach(([label, original, converted], index) => {
+      const rowY = y + rowHeight * (index + 1);
+      doc.setFillColor(index === 2 ? 255 : 248, index === 2 ? 247 : 250, index === 2 ? 237 : 252);
+      doc.rect(margin, rowY, contentWidth, rowHeight, 'F');
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, rowY, pageWidth - margin, rowY);
+      doc.setTextColor(17, 24, 39);
+      doc.setFont('helvetica', index === 2 ? 'bold' : 'normal');
+      doc.setFontSize(index === 2 ? 10.5 : 9.5);
+      doc.text(label, margin + 5, rowY + 8.3);
+      doc.text(formatAmount(original, originalCurrency), margin + labelWidth + 5, rowY + 8.3);
+      doc.text(formatAmount(converted, displayCurrency), margin + labelWidth + amountWidth + 5, rowY + 8.3);
+    });
+    doc.setDrawColor(226, 232, 240);
+    doc.roundedRect(margin, y, contentWidth, tableHeight, 2, 2);
+    doc.line(margin + labelWidth, y, margin + labelWidth, y + tableHeight);
+    doc.line(margin + labelWidth + amountWidth, y, margin + labelWidth + amountWidth, y + tableHeight);
+    y += tableHeight + 9;
+
+    ensureSpace(24);
+    doc.setFillColor(receipt.converted_total === null ? 255 : 240, receipt.converted_total === null ? 247 : 253, receipt.converted_total === null ? 237 : 250);
+    doc.setDrawColor(receipt.converted_total === null ? 251 : 167, receipt.converted_total === null ? 146 : 243, receipt.converted_total === null ? 60 : 208);
+    doc.roundedRect(margin, y, contentWidth, 20, 3, 3, 'FD');
+    doc.setTextColor(71, 85, 105);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    const rateLabel = receipt.exchange_rate === null
+      ? 'Currency conversion unavailable. Converted values are not included.'
+      : `Exchange rate: 1 ${originalCurrency} = ${Number(receipt.exchange_rate).toLocaleString('en-US', { maximumFractionDigits: 6 })} ${displayCurrency}`;
+    doc.text(rateLabel, margin + 6, y + 8);
     doc.text(
-      receipt.converted_total === null
-        ? 'Converted total: unavailable'
-        : `Converted total: ${receipt.converted_total} ${displayCurrency}`,
-      30,
-      148,
+      `Source: ${receipt.exchange_rate_source || 'N/A'}  |  Rate date: ${receipt.exchange_rate_date || 'N/A'}`,
+      margin + 6,
+      y + 14,
     );
+    y += 31;
 
     if (receipt.insight) {
-      doc.setFontSize(11);
+      sectionTitle('AI insight');
       doc.setFont('helvetica', 'normal');
-      doc.text(doc.splitTextToSize(`AI insight: ${receipt.insight}`, 20, { maxWidth: 170 }), 20, 164);
+      doc.setFontSize(10);
+      doc.setTextColor(51, 65, 85);
+      const insightLines = doc.splitTextToSize(String(receipt.insight), contentWidth - 12);
+      const lineHeight = 5.5;
+      let lineIndex = 0;
+      while (lineIndex < insightLines.length) {
+        ensureSpace(lineHeight);
+        const availableLines = Math.max(1, Math.floor((pageHeight - bottomMargin - y) / lineHeight));
+        const pageLines = insightLines.slice(lineIndex, lineIndex + availableLines);
+        doc.text(pageLines, margin + 6, y);
+        y += pageLines.length * lineHeight;
+        lineIndex += pageLines.length;
+        if (lineIndex < insightLines.length) addPage();
+      }
+    }
+
+    const pageCount = doc.getNumberOfPages();
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      doc.setPage(pageNumber);
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, pageHeight - 12, pageWidth - margin, pageHeight - 12);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(100, 116, 139);
+      const footerName = doc.splitTextToSize(`${companyName} | ReceiptAI`, 120)[0];
+      doc.text(footerName, margin, pageHeight - 7);
+      doc.text(`Page ${pageNumber} of ${pageCount}`, pageWidth - margin, pageHeight - 7, { align: 'right' });
     }
 
     const pdf = Buffer.from(doc.output('arraybuffer'));

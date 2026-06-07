@@ -56,6 +56,8 @@ export interface DashboardSettings {
   conversionRateMode: 'latest' | 'historical';
   vatLabel: string;
   compactMode: boolean;
+  companyName: string;
+  userName: string;
 }
 
 export interface ReceiptFormState {

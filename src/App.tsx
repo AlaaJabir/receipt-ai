@@ -52,6 +52,8 @@ const defaultSettings: DashboardSettings = {
   conversionRateMode: 'latest',
   vatLabel: 'TVA récupérable',
   compactMode: false,
+  companyName: '',
+  userName: '',
 };
 
 type Page = 'dashboard' | 'analytics' | 'settings';
@@ -412,7 +414,13 @@ export default function App() {
     if (!selectedReceipt) return;
     setError('');
     try {
-      const res = await fetch(`/api/receipts/${selectedReceipt.id}/export-pdf`);
+      const params = new URLSearchParams({
+        display_currency: settings.defaultCurrency,
+        conversion_rate_mode: settings.conversionRateMode,
+      });
+      if (settings.companyName.trim()) params.set('company_name', settings.companyName.trim());
+      if (settings.userName.trim()) params.set('user_name', settings.userName.trim());
+      const res = await fetch(`/api/receipts/${selectedReceipt.id}/export-pdf?${params}`);
       if (!res.ok) {
         const data = await readApiResponse(res);
         throw new Error(data.error || 'PDF export failed.');
@@ -690,6 +698,31 @@ export default function App() {
             <section className="max-w-3xl rounded-lg border border-white/10 bg-white/[0.05] p-6 shadow-2xl shadow-black/20 backdrop-blur">
               <h3 className="text-lg font-semibold">Dashboard preferences</h3>
               <div className="mt-6 grid gap-5">
+                <div className="grid gap-4 rounded-lg border border-white/10 bg-black/20 p-4 md:grid-cols-2">
+                  <label className="grid gap-2 text-sm">
+                    <span className="text-slate-400">Company name for PDF</span>
+                    <input
+                      value={settings.companyName}
+                      onChange={event => setSettings(prev => ({ ...prev, companyName: event.target.value }))}
+                      placeholder="Your company"
+                      maxLength={100}
+                      className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 outline-none focus:border-orange-500"
+                    />
+                  </label>
+                  <label className="grid gap-2 text-sm">
+                    <span className="text-slate-400">Prepared by / user name</span>
+                    <input
+                      value={settings.userName}
+                      onChange={event => setSettings(prev => ({ ...prev, userName: event.target.value }))}
+                      placeholder="Your full name"
+                      maxLength={100}
+                      className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 outline-none focus:border-orange-500"
+                    />
+                  </label>
+                  <p className="text-xs text-slate-500 md:col-span-2">
+                    These details are saved on this device and printed in the professional PDF header.
+                  </p>
+                </div>
                 <label className="grid gap-2 text-sm">
                   <span className="text-slate-400">Default currency</span>
                   <select
