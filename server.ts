@@ -197,6 +197,66 @@ async function convertReceiptValues(
   }
 }
 
+function logConversion(context: string, receipt: Record<string, any>, conversion: ConversionResult) {
+  console.info(`[currency:${context}]`, {
+    receipt_id: receipt.id || null,
+    original_total: receipt.original_total ?? receipt.total ?? null,
+    original_currency: receipt.original_currency ?? receipt.currency ?? null,
+    converted_total: conversion.converted_total,
+    display_currency: conversion.display_currency,
+    exchange_rate: conversion.exchange_rate,
+    exchange_rate_source: conversion.exchange_rate_source,
+  });
+}
+
+function needsConversion(receipt: Record<string, any>, displayCurrency: string): boolean {
+  const originalCurrency = normalizeCurrency(receipt.original_currency ?? receipt.currency);
+  const originalTotal = parseMoney(receipt.original_total ?? receipt.total);
+  const originalTva = parseMoney(receipt.original_tva ?? receipt.tva);
+  const convertedTotal = parseMoney(receipt.converted_total);
+  const convertedTva = parseMoney(receipt.converted_tva);
+  const exchangeRate = parseMoney(receipt.exchange_rate);
+  const totalDoesNotMatchRate = originalTotal !== null
+    && convertedTotal !== null
+    && exchangeRate !== null
+    && Math.abs(convertedTotal - roundMoney(originalTotal, exchangeRate)!) > 0.01;
+  const tvaDoesNotMatchRate = originalTva !== null
+    && convertedTva !== null
+    && exchangeRate !== null
+    && Math.abs(convertedTva - roundMoney(originalTva, exchangeRate)!) > 0.01;
+
+  return receipt.display_currency !== displayCurrency
+    || receipt.exchange_rate_source === 'failed'
+    || (originalCurrency !== displayCurrency && (receipt.exchange_rate_source === 'identity' || exchangeRate === 1))
+    || (originalTotal !== null && convertedTotal === null)
+    || (originalTva !== null && convertedTva === null)
+    || exchangeRate === null
+    || totalDoesNotMatchRate
+    || tvaDoesNotMatchRate;
+}
+
+async function ensureReceiptConversion(receipt: Record<string, any>, displayCurrency: string) {
+  if (!needsConversion(receipt, displayCurrency)) return receipt;
+
+  const normalized = normalizeReceipt(receipt);
+  const conversion = await convertReceiptValues(normalized, displayCurrency);
+  logConversion('fallback', receipt, conversion);
+
+  const updateResult = await (getSupabase() as any)
+    .from('receipts')
+    .update({ ...conversion, updated_at: new Date().toISOString() })
+    .eq('id', receipt.id)
+    .select()
+    .single();
+
+  if (updateResult.error) {
+    console.error(`[currency:persist-failed] receipt=${receipt.id}`, updateResult.error.message);
+    return { ...receipt, ...conversion };
+  }
+
+  return updateResult.data;
+}
+
 function getMissingColumn(message: string): string | null {
   const schemaCacheMatch = message.match(/Could not find the '([^']+)' column/i);
   if (schemaCacheMatch) return schemaCacheMatch[1];
@@ -320,7 +380,8 @@ app.get('/api/health', async (_req, res) => {
 
 app.get('/api/receipts', async (req, res) => {
   try {
-    const { month, category, status, search, from, to } = req.query as Record<string, string | undefined>;
+    const { month, category, status, search, from, to, display_currency } = req.query as Record<string, string | undefined>;
+    const displayCurrency = normalizeCurrency(display_currency || 'MAD');
     let query = getSupabase().from('receipts').select('*').order('created_at', { ascending: false });
 
     if (category && category !== 'All') query = query.eq('category', category);
@@ -333,9 +394,12 @@ app.get('/api/receipts', async (req, res) => {
     const { data, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
 
-    const receipts = (data || [])
-      .filter(receipt => matchesDateFilters(receipt, month, from, to))
-      .map(getPublicReceipt);
+    const filteredReceipts = ((data || []) as Array<Record<string, any>>)
+      .filter(receipt => matchesDateFilters(receipt, month, from, to));
+    const convertedReceipts = await Promise.all(
+      filteredReceipts.map(receipt => ensureReceiptConversion(receipt, displayCurrency)),
+    );
+    const receipts = convertedReceipts.map(getPublicReceipt);
 
     res.json({ receipts });
   } catch (err: any) {
@@ -430,6 +494,7 @@ The status must be Pending Approval.`,
 
     const normalizedReceipt = normalizeReceipt({ ...parsed, status: 'Pending Approval' }, file);
     const conversion = await convertReceiptValues(normalizedReceipt, req.body.display_currency);
+    logConversion('upload', normalizedReceipt, conversion);
     const receiptPayload = { ...normalizedReceipt, ...conversion };
     const { data, error } = await insertReceiptWithSchemaFallback(receiptPayload);
 
@@ -453,6 +518,7 @@ app.post('/api/receipts/reconvert', async (req, res) => {
     for (const receipt of (receipts || []) as Array<Record<string, any>>) {
       const normalized = normalizeReceipt(receipt);
       const conversion = await convertReceiptValues(normalized, displayCurrency);
+      logConversion('reconvert', receipt, conversion);
       const updateResult = await (getSupabase() as any)
         .from('receipts')
         .update({ ...conversion, updated_at: new Date().toISOString() })
@@ -494,6 +560,7 @@ app.patch('/api/receipts/:id', async (req, res) => {
     const conversion = originalValuesChanged
       ? await convertReceiptValues(normalized, req.body.display_currency || currentReceipt.display_currency)
       : {};
+    if (originalValuesChanged) logConversion('update', currentReceipt, conversion as ConversionResult);
     const payload = {
       ...normalized,
       ...conversion,

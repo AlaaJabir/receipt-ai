@@ -63,6 +63,12 @@ function numberValue(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function hasDashboardConversion(receipt: Receipt, displayCurrency: string) {
+  return receipt.display_currency === displayCurrency
+    && receipt.exchange_rate_source !== 'failed'
+    && receipt.converted_total !== null;
+}
+
 async function readApiResponse(res: Response) {
   const contentType = res.headers.get('content-type') || '';
   if (contentType.includes('application/json')) {
@@ -116,15 +122,14 @@ export default function App() {
   const [error, setError] = useState('');
   const [health, setHealth] = useState('checking');
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const conversionCurrencyRef = useRef('');
-
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
     Object.entries(filters).forEach(([key, value]: [string, string]) => {
       if (value && value !== 'All') params.set(key, value);
     });
+    params.set('display_currency', settings.defaultCurrency);
     return params.toString();
-  }, [filters]);
+  }, [filters, settings.defaultCurrency]);
 
   const fetchReceipts = useCallback(async () => {
     setLoading(true);
@@ -156,30 +161,6 @@ export default function App() {
   }, [settings]);
 
   useEffect(() => {
-    const displayCurrency = settings.defaultCurrency.trim().toUpperCase();
-    if (!/^[A-Z]{3}$/.test(displayCurrency) || conversionCurrencyRef.current === displayCurrency) return;
-    conversionCurrencyRef.current = displayCurrency;
-
-    const timer = window.setTimeout(async () => {
-      try {
-        const res = await fetch('/api/receipts/reconvert', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ display_currency: displayCurrency }),
-        });
-        const data = await readApiResponse(res);
-        if (!res.ok) throw new Error(data.error || 'Failed to update currency conversions.');
-        setReceipts(data.receipts || []);
-        setSelectedReceipt(current => data.receipts?.find((receipt: Receipt) => receipt.id === current?.id) || data.receipts?.[0] || null);
-      } catch (err: any) {
-        setError(err.message || 'Currency conversion failed.');
-      }
-    }, 500);
-
-    return () => window.clearTimeout(timer);
-  }, [settings.defaultCurrency]);
-
-  useEffect(() => {
     fetch('/api/health')
       .then(readApiResponse)
       .then(data => setHealth(data.supabase === 'ok' ? 'connected' : data.supabase || 'error'))
@@ -187,11 +168,7 @@ export default function App() {
   }, []);
 
   const totals = useMemo(() => {
-    const converted = receipts.filter(receipt =>
-      receipt.display_currency === settings.defaultCurrency
-      && receipt.exchange_rate_source !== 'failed'
-      && receipt.converted_total !== null,
-    );
+    const converted = receipts.filter(receipt => hasDashboardConversion(receipt, settings.defaultCurrency));
     const total = converted.reduce((sum, receipt) => sum + Number(receipt.converted_total), 0);
     const tva = converted.reduce((sum, receipt) => sum + Number(receipt.converted_tva || 0), 0);
     const average = converted.length ? total / converted.length : 0;
@@ -205,14 +182,14 @@ export default function App() {
   const categoryData = useMemo(() => {
     const grouped = new Map<string, number>();
     receipts
-      .filter(receipt => receipt.display_currency === settings.defaultCurrency && receipt.converted_total !== null)
+      .filter(receipt => hasDashboardConversion(receipt, settings.defaultCurrency))
       .forEach(receipt => grouped.set(receipt.category || 'Other', (grouped.get(receipt.category || 'Other') || 0) + Number(receipt.converted_total)));
     return Array.from(grouped.entries()).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   }, [receipts, settings.defaultCurrency]);
 
   const monthlyTrend = useMemo(() => {
     const grouped = new Map<string, number>();
-    receipts.filter(receipt => receipt.display_currency === settings.defaultCurrency && receipt.converted_total !== null).forEach(receipt => {
+    receipts.filter(receipt => hasDashboardConversion(receipt, settings.defaultCurrency)).forEach(receipt => {
       const source = receipt.receipt_date || receipt.date || receipt.created_at;
       const parsed = new Date(source || '');
       const label = Number.isNaN(parsed.getTime()) ? 'Unknown' : parsed.toISOString().slice(0, 7);
