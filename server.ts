@@ -506,6 +506,227 @@ app.get('/api/receipts', async (req, res) => {
   }
 });
 
+app.get('/api/receipts/export-pdf', async (req, res) => {
+  try {
+    const {
+      month,
+      category,
+      status,
+      search,
+      from,
+      to,
+      display_currency,
+      conversion_rate_mode,
+      company_name,
+      user_name,
+    } = req.query as Record<string, string | undefined>;
+    const displayCurrency = getDisplayCurrency(display_currency);
+    const rateMode = getConversionRateMode(conversion_rate_mode);
+    if (!displayCurrency) {
+      return res.status(400).json({ error: 'display_currency must be a 3-letter ISO currency code.' });
+    }
+
+    let query = getSupabase().from('receipts').select('*').order('receipt_date', { ascending: false });
+    if (category && category !== 'All') query = query.eq('category', category);
+    if (status && status !== 'All') query = query.eq('status', status);
+    if (search) {
+      const term = `%${search}%`;
+      query = query.or(`merchant.ilike.${term},category.ilike.${term},date.ilike.${term},status.ilike.${term},transaction_ref.ilike.${term}`);
+    }
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+
+    const filteredReceipts = ((data || []) as Array<Record<string, any>>)
+      .filter(receipt => matchesDateFilters(receipt, month, from, to));
+    if (!filteredReceipts.length) {
+      return res.status(404).json({ error: 'No receipts match the selected history filters.' });
+    }
+
+    const convertedReceipts = await Promise.all(
+      filteredReceipts.map(receipt => ensureReceiptConversion(receipt, displayCurrency, rateMode)),
+    );
+    const receipts = convertedReceipts.map(getPublicReceipt);
+    const includedReceipts = receipts.filter(receipt =>
+      receipt.display_currency === displayCurrency
+      && receipt.exchange_rate_source !== 'failed'
+      && receipt.converted_total !== null,
+    );
+    const excludedCount = receipts.length - includedReceipts.length;
+    const total = includedReceipts.reduce((sum, receipt) => sum + Number(receipt.converted_total), 0);
+    const totalTva = includedReceipts.reduce((sum, receipt) => sum + Number(receipt.converted_tva || 0), 0);
+    const counts = STATUSES.reduce(
+      (result, receiptStatus) => ({
+        ...result,
+        [receiptStatus]: receipts.filter(receipt => receipt.status === receiptStatus).length,
+      }),
+      {} as Record<string, number>,
+    );
+
+    const { jsPDF } = await import('jspdf');
+    const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'landscape' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 14;
+    const contentWidth = pageWidth - margin * 2;
+    const bottomMargin = 15;
+    const companyName = String(company_name || '').trim().slice(0, 100) || 'ReceiptAI';
+    const userName = String(user_name || '').trim().slice(0, 100);
+    const periodLabel = month
+      ? `Month: ${month}`
+      : from || to
+        ? `Period: ${from || 'Beginning'} to ${to || 'Today'}`
+        : 'Period: All history';
+    const activeFilters = [
+      category && category !== 'All' ? `Category: ${category}` : null,
+      status && status !== 'All' ? `Status: ${status}` : null,
+      search ? `Search: ${search}` : null,
+    ].filter(Boolean).join('  |  ');
+    let y = 0;
+
+    const formatAmount = (value: unknown, currency: string) => {
+      const amount = value === null || value === undefined ? null : Number(value);
+      if (amount === null || !Number.isFinite(amount)) return 'Unavailable';
+      return `${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+    };
+
+    const drawReportHeader = (continued = false) => {
+      doc.setFillColor(17, 24, 39);
+      doc.rect(0, 0, pageWidth, continued ? 30 : 43, 'F');
+      doc.setFillColor(249, 115, 22);
+      doc.rect(0, continued ? 30 : 43, pageWidth, 2, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(continued ? 15 : 20);
+      doc.text(doc.splitTextToSize(companyName, 125).slice(0, 1), margin, continued ? 14 : 16);
+      doc.setFontSize(continued ? 10 : 12);
+      doc.text(continued ? 'RECEIPT HISTORY - CONTINUED' : 'PROFESSIONAL EXPENSE HISTORY', pageWidth - margin, continued ? 14 : 16, { align: 'right' });
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(203, 213, 225);
+      if (!continued) {
+        if (userName) doc.text(`Prepared by ${userName}`, margin, 24);
+        doc.text(`Generated ${new Date().toLocaleString('en-GB')}`, pageWidth - margin, 24, { align: 'right' });
+        doc.text(periodLabel, margin, 34);
+        if (activeFilters) doc.text(doc.splitTextToSize(activeFilters, 130)[0], pageWidth - margin, 34, { align: 'right' });
+      }
+      y = continued ? 39 : 52;
+    };
+
+    const columnWidths = [24, 68, 31, 35, 52, 59];
+    const columnLabels = ['DATE', 'MERCHANT', 'CATEGORY', 'STATUS', 'ORIGINAL', `CONVERTED (${displayCurrency})`];
+    const columnX = columnWidths.reduce<number[]>((positions, width, index) => {
+      positions.push(index === 0 ? margin : positions[index - 1] + columnWidths[index - 1]);
+      return positions;
+    }, []);
+
+    const drawTableHeader = () => {
+      doc.setFillColor(30, 41, 59);
+      doc.rect(margin, y, contentWidth, 10, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(255, 255, 255);
+      columnLabels.forEach((label, index) => doc.text(label, columnX[index] + 3, y + 6.5));
+      y += 10;
+    };
+
+    const addReportPage = () => {
+      doc.addPage();
+      drawReportHeader(true);
+      drawTableHeader();
+    };
+
+    drawReportHeader();
+    const metricGap = 4;
+    const metrics = [
+      ['TOTAL', formatAmount(total, displayCurrency)],
+      ['TVA', formatAmount(totalTva, displayCurrency)],
+      ['RECEIPTS', String(receipts.length)],
+      ['APPROVED', String(counts.Approved || 0)],
+      ['PENDING', String(counts['Pending Approval'] || 0)],
+      ['REJECTED', String(counts.Rejected || 0)],
+    ];
+    const metricWidth = (contentWidth - metricGap * (metrics.length - 1)) / metrics.length;
+    metrics.forEach(([label, value], index) => {
+      const x = margin + index * (metricWidth + metricGap);
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(x, y, metricWidth, 23, 2, 2, 'FD');
+      doc.setTextColor(100, 116, 139);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.text(label, x + 4, y + 7);
+      doc.setTextColor(17, 24, 39);
+      doc.setFontSize(11);
+      doc.text(doc.splitTextToSize(value, metricWidth - 8)[0], x + 4, y + 16);
+    });
+    y += 31;
+
+    if (excludedCount) {
+      doc.setFillColor(255, 247, 237);
+      doc.setDrawColor(251, 146, 60);
+      doc.roundedRect(margin, y, contentWidth, 11, 2, 2, 'FD');
+      doc.setTextColor(154, 52, 18);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.text(`${excludedCount} receipt${excludedCount === 1 ? '' : 's'} excluded from converted totals because conversion was unavailable.`, margin + 4, y + 7);
+      y += 16;
+    }
+
+    drawTableHeader();
+    receipts.forEach((receipt, index) => {
+      const merchantLines = doc.splitTextToSize(receipt.merchant || 'Unknown merchant', columnWidths[1] - 6).slice(0, 2);
+      const rowHeight = Math.max(11, merchantLines.length * 4.5 + 4);
+      if (y + rowHeight > pageHeight - bottomMargin) addReportPage();
+
+      doc.setFillColor(index % 2 === 0 ? 255 : 248, index % 2 === 0 ? 255 : 250, index % 2 === 0 ? 255 : 252);
+      doc.rect(margin, y, contentWidth, rowHeight, 'F');
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, y + rowHeight, pageWidth - margin, y + rowHeight);
+      doc.setTextColor(30, 41, 59);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      const originalCurrency = receipt.original_currency || receipt.currency || 'MAD';
+      const convertedAmount = receipt.converted_total === null
+        ? 'Unavailable'
+        : formatAmount(receipt.converted_total, displayCurrency);
+      const cells: Array<string | string[]> = [
+        receipt.receipt_date || receipt.date || 'N/A',
+        merchantLines,
+        doc.splitTextToSize(receipt.category || 'Other', columnWidths[2] - 6).slice(0, 2),
+        doc.splitTextToSize(receipt.status || 'Pending Approval', columnWidths[3] - 6).slice(0, 2),
+        formatAmount(receipt.original_total ?? receipt.total, originalCurrency),
+        convertedAmount,
+      ];
+      cells.forEach((cell, cellIndex) => {
+        doc.text(cell, columnX[cellIndex] + 3, y + 6, { lineHeightFactor: 1.15 });
+      });
+      y += rowHeight;
+    });
+
+    const pageCount = doc.getNumberOfPages();
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      doc.setPage(pageNumber);
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, pageHeight - 10, pageWidth - margin, pageHeight - 10);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text(doc.splitTextToSize(`${companyName} | ReceiptAI`, 170)[0], margin, pageHeight - 5.5);
+      doc.text(`Page ${pageNumber} of ${pageCount}`, pageWidth - margin, pageHeight - 5.5, { align: 'right' });
+    }
+
+    const filePeriod = month || (from || to ? `${from || 'start'}_${to || 'today'}` : 'all-history');
+    const safePeriod = filePeriod.replace(/[^a-zA-Z0-9_-]/g, '-');
+    const pdf = Buffer.from(doc.output('arraybuffer'));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="ReceiptAI_History_${safePeriod}.pdf"`);
+    res.send(pdf);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/receipts/:id', async (req, res) => {
   try {
     const { data, error } = await getSupabase().from('receipts').select('*').eq('id', req.params.id).single();

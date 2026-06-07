@@ -159,6 +159,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [exportingHistory, setExportingHistory] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [health, setHealth] = useState('checking');
@@ -437,6 +438,33 @@ export default function App() {
     }
   }
 
+  async function exportHistoryPdf() {
+    setError('');
+    setExportingHistory(true);
+    try {
+      const params = new URLSearchParams(queryString);
+      if (settings.companyName.trim()) params.set('company_name', settings.companyName.trim());
+      if (settings.userName.trim()) params.set('user_name', settings.userName.trim());
+      const res = await fetch(`/api/receipts/export-pdf?${params}`);
+      if (!res.ok) {
+        const data = await readApiResponse(res);
+        throw new Error(data.error || 'History PDF export failed.');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const period = filters.month || (filters.from || filters.to ? `${filters.from || 'start'}_${filters.to || 'today'}` : 'all-history');
+      link.href = url;
+      link.download = `ReceiptAI_History_${period}.pdf`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err.message || 'History PDF export failed.');
+    } finally {
+      setExportingHistory(false);
+    }
+  }
+
   const navItems = [
     { page: 'dashboard' as const, label: 'Dashboard', icon: Home },
     { page: 'analytics' as const, label: 'Analytics', icon: BarChart3 },
@@ -600,7 +628,13 @@ export default function App() {
                 <Kpi title="Approved" value={loading && !receipts.length ? '...' : String(totals.counts.Approved || 0)} icon={Check} />
               </section>
 
-              <FilterBar filters={filters} setFilters={setFilters} />
+              <FilterBar
+                filters={filters}
+                setFilters={setFilters}
+                onExport={exportHistoryPdf}
+                exporting={exportingHistory}
+                receiptCount={receipts.length}
+              />
 
               <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_390px]">
                 <div className="space-y-6">
@@ -830,7 +864,19 @@ function Kpi({ title, value, icon: Icon }: { title: string; value: string; icon:
   );
 }
 
-function FilterBar({ filters, setFilters }: { filters: ReceiptFilters; setFilters: React.Dispatch<React.SetStateAction<ReceiptFilters>> }) {
+function FilterBar({
+  filters,
+  setFilters,
+  onExport,
+  exporting,
+  receiptCount,
+}: {
+  filters: ReceiptFilters;
+  setFilters: React.Dispatch<React.SetStateAction<ReceiptFilters>>;
+  onExport: () => void;
+  exporting: boolean;
+  receiptCount: number;
+}) {
   return (
     <section className="rounded-lg border border-white/10 bg-white/[0.04] p-4 backdrop-blur">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -838,7 +884,17 @@ function FilterBar({ filters, setFilters }: { filters: ReceiptFilters; setFilter
           <Filter size={17} className="text-orange-400" />
           Receipt history
         </div>
-        <p className="text-xs text-slate-500">{filters.month ? `Showing ${filters.month}` : 'Showing all months'}</p>
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="text-xs text-slate-500">{filters.month ? `Showing ${filters.month}` : 'Showing all months'}</p>
+          <button
+            onClick={onExport}
+            disabled={exporting || receiptCount === 0}
+            className="flex h-9 items-center gap-2 rounded-lg border border-orange-500/30 bg-orange-500/10 px-3 text-xs font-semibold text-orange-200 transition hover:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+            {exporting ? 'Preparing PDF...' : 'Export history PDF'}
+          </button>
+        </div>
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
         <label className="relative xl:col-span-2">
