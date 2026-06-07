@@ -27,6 +27,7 @@ OPENAI_API_KEY=
 ```sql
 supabase/migrations/20260604000000_create_receipts.sql
 supabase/migrations/20260607000000_add_receipt_file_metadata.sql
+supabase/migrations/20260607010000_sync_receipts_schema.sql
 ```
 
 You can paste it into the Supabase SQL editor or run it with the Supabase CLI.

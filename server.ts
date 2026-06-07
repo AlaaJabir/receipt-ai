@@ -100,8 +100,32 @@ function normalizeReceipt(payload: Record<string, unknown>, file?: Express.Multe
   };
 }
 
-function isMissingFileMetadataColumn(message: string): boolean {
-  return /(?:file_name|file_type).*(?:schema cache|column)|column.*(?:file_name|file_type)/i.test(message);
+function getMissingColumn(message: string): string | null {
+  const schemaCacheMatch = message.match(/Could not find the '([^']+)' column/i);
+  if (schemaCacheMatch) return schemaCacheMatch[1];
+
+  const postgresMatch = message.match(/column ["']?([a-zA-Z0-9_]+)["']? (?:does not exist|of relation .* does not exist)/i);
+  return postgresMatch?.[1] || null;
+}
+
+async function insertReceiptWithSchemaFallback(receiptPayload: Record<string, unknown>) {
+  const compatiblePayload = { ...receiptPayload };
+
+  for (let attempt = 0; attempt <= Object.keys(receiptPayload).length; attempt += 1) {
+    const result = await getSupabase()
+      .from('receipts')
+      .insert([compatiblePayload] as any)
+      .select()
+      .single();
+
+    if (!result.error) return result;
+
+    const missingColumn = getMissingColumn(result.error.message);
+    if (!missingColumn || !(missingColumn in compatiblePayload)) return result;
+    delete compatiblePayload[missingColumn];
+  }
+
+  throw new Error('Unable to create a receipt with the deployed Supabase schema.');
 }
 
 function parseReceiptDate(dateText: string | null | undefined): Date | null {
@@ -289,22 +313,7 @@ The status must be Pending Approval.`,
     }
 
     const receiptPayload = normalizeReceipt({ ...parsed, status: 'Pending Approval' }, file);
-    let { data, error } = await getSupabase()
-      .from('receipts')
-      .insert([receiptPayload] as any)
-      .select()
-      .single();
-
-    if (error && isMissingFileMetadataColumn(error.message)) {
-      const { file_name: _fileName, file_type: _fileType, ...compatiblePayload } = receiptPayload;
-      const retry = await getSupabase()
-        .from('receipts')
-        .insert([compatiblePayload] as any)
-        .select()
-        .single();
-      data = retry.data;
-      error = retry.error;
-    }
+    const { data, error } = await insertReceiptWithSchemaFallback(receiptPayload);
 
     if (error) return res.status(500).json({ error: `Failed to save to Supabase: ${error.message}` });
     res.json({ receipt: getPublicReceipt(data) });
