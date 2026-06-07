@@ -134,6 +134,35 @@ function normalizeReceipt(payload: Record<string, unknown>, file?: Express.Multe
   };
 }
 
+function normalizedMerchant(value: unknown): string {
+  return String(value || '').trim().toLocaleLowerCase();
+}
+
+async function findDuplicateReceipts(receipt: ReturnType<typeof normalizeReceipt>, excludeId?: string) {
+  let query = (getSupabase() as any)
+    .from('receipts')
+    .select('id, merchant, receipt_date, original_total, original_currency, original_tva, created_at');
+
+  query = receipt.receipt_date === null
+    ? query.is('receipt_date', null)
+    : query.eq('receipt_date', receipt.receipt_date);
+  query = receipt.original_total === null
+    ? query.is('original_total', null)
+    : query.eq('original_total', receipt.original_total);
+  query = query.eq('original_currency', receipt.original_currency);
+  query = receipt.original_tva === null
+    ? query.is('original_tva', null)
+    : query.eq('original_tva', receipt.original_tva);
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Duplicate check failed: ${error.message}`);
+
+  const merchant = normalizedMerchant(receipt.merchant);
+  return ((data || []) as Array<Record<string, any>>).filter(candidate =>
+    candidate.id !== excludeId && normalizedMerchant(candidate.merchant) === merchant,
+  );
+}
+
 type ConversionResult = {
   display_currency: string;
   converted_total: number | null;
@@ -143,6 +172,12 @@ type ConversionResult = {
   exchange_rate_date: string | null;
   exchange_rate_source: 'historical' | 'latest' | 'identity' | 'failed';
 };
+
+type ConversionRateMode = 'latest' | 'historical';
+
+function getConversionRateMode(value: unknown): ConversionRateMode {
+  return value === 'historical' ? 'historical' : 'latest';
+}
 
 function roundMoney(value: number | null, rate: number): number | null {
   return value === null ? null : Math.round(value * rate * 100) / 100;
@@ -181,9 +216,11 @@ async function requestExchangeRate(base: string, quote: string, date?: string) {
 async function convertReceiptValues(
   receipt: ReturnType<typeof normalizeReceipt>,
   displayCurrencyValue: unknown,
+  rateModeValue: unknown = 'latest',
 ): Promise<ConversionResult> {
   const displayCurrency = normalizeCurrency(displayCurrencyValue || 'MAD');
   const originalCurrency = receipt.original_currency;
+  const rateMode = getConversionRateMode(rateModeValue);
 
   if (originalCurrency === displayCurrency) {
     return {
@@ -192,19 +229,22 @@ async function convertReceiptValues(
       converted_ht: receipt.original_ht,
       converted_tva: receipt.original_tva,
       exchange_rate: 1,
-      exchange_rate_date: receipt.receipt_date,
+      exchange_rate_date: rateMode === 'historical'
+        ? receipt.receipt_date
+        : new Date().toISOString().slice(0, 10),
       exchange_rate_source: 'identity',
     };
   }
 
   try {
     let rateResult: { rate: number; date: string };
-    let source: ConversionResult['exchange_rate_source'] = 'historical';
+    let source: ConversionResult['exchange_rate_source'];
 
-    try {
-      if (!receipt.receipt_date) throw new Error('Receipt date unavailable.');
+    if (rateMode === 'historical') {
+      if (!receipt.receipt_date) throw new Error('Receipt date unavailable for historical conversion.');
       rateResult = await requestExchangeRate(originalCurrency, displayCurrency, receipt.receipt_date);
-    } catch {
+      source = 'historical';
+    } else {
       rateResult = await requestExchangeRate(originalCurrency, displayCurrency);
       source = 'latest';
     }
@@ -244,7 +284,11 @@ function logConversion(context: string, receipt: Record<string, any>, conversion
   });
 }
 
-function needsConversion(receipt: Record<string, any>, displayCurrency: string): boolean {
+function needsConversion(
+  receipt: Record<string, any>,
+  displayCurrency: string,
+  rateMode: ConversionRateMode,
+): boolean {
   const originalCurrency = normalizeCurrency(receipt.original_currency ?? receipt.currency);
   const originalTotal = parseMoney(receipt.original_total ?? receipt.total);
   const originalTva = parseMoney(receipt.original_tva ?? receipt.tva);
@@ -262,6 +306,7 @@ function needsConversion(receipt: Record<string, any>, displayCurrency: string):
 
   return receipt.display_currency !== displayCurrency
     || receipt.exchange_rate_source === 'failed'
+    || (originalCurrency !== displayCurrency && receipt.exchange_rate_source !== rateMode)
     || (originalCurrency !== displayCurrency && (receipt.exchange_rate_source === 'identity' || exchangeRate === 1))
     || (originalTotal !== null && convertedTotal === null)
     || (originalTva !== null && convertedTva === null)
@@ -270,11 +315,15 @@ function needsConversion(receipt: Record<string, any>, displayCurrency: string):
     || tvaDoesNotMatchRate;
 }
 
-async function ensureReceiptConversion(receipt: Record<string, any>, displayCurrency: string) {
-  if (!needsConversion(receipt, displayCurrency)) return receipt;
+async function ensureReceiptConversion(
+  receipt: Record<string, any>,
+  displayCurrency: string,
+  rateMode: ConversionRateMode,
+) {
+  if (!needsConversion(receipt, displayCurrency, rateMode)) return receipt;
 
   const normalized = normalizeReceipt(receipt);
-  const conversion = await convertReceiptValues(normalized, displayCurrency);
+  const conversion = await convertReceiptValues(normalized, displayCurrency, rateMode);
   logConversion('fallback', receipt, conversion);
 
   const updateResult = await (getSupabase() as any)
@@ -415,8 +464,9 @@ app.get('/api/health', async (_req, res) => {
 
 app.get('/api/receipts', async (req, res) => {
   try {
-    const { month, category, status, search, from, to, display_currency } = req.query as Record<string, string | undefined>;
+    const { month, category, status, search, from, to, display_currency, conversion_rate_mode } = req.query as Record<string, string | undefined>;
     const displayCurrency = getDisplayCurrency(display_currency);
+    const rateMode = getConversionRateMode(conversion_rate_mode);
     if (!displayCurrency) return res.status(400).json({ error: 'display_currency must be a 3-letter ISO currency code.' });
     let query = getSupabase().from('receipts').select('*').order('created_at', { ascending: false });
 
@@ -433,12 +483,13 @@ app.get('/api/receipts', async (req, res) => {
     const filteredReceipts = ((data || []) as Array<Record<string, any>>)
       .filter(receipt => matchesDateFilters(receipt, month, from, to));
     const convertedReceipts = await Promise.all(
-      filteredReceipts.map(receipt => ensureReceiptConversion(receipt, displayCurrency)),
+      filteredReceipts.map(receipt => ensureReceiptConversion(receipt, displayCurrency, rateMode)),
     );
     const receipts = convertedReceipts.map(getPublicReceipt);
     debugServer('fetch', {
       fetchedReceiptsCount: receipts.length,
       selectedCurrency: displayCurrency,
+      conversionRateMode: rateMode,
       selectedMonth: month || 'all',
       statusCounts: STATUSES.reduce(
         (counts, receiptStatus) => ({
@@ -541,9 +592,20 @@ The status must be Pending Approval.`,
     }
 
     const displayCurrency = getDisplayCurrency(req.body.display_currency);
+    const rateMode = getConversionRateMode(req.body.conversion_rate_mode);
     if (!displayCurrency) return res.status(400).json({ error: 'display_currency must be a 3-letter ISO currency code.' });
     const normalizedReceipt = normalizeReceipt({ ...parsed, status: 'Pending Approval' }, file);
-    const conversion = await convertReceiptValues(normalizedReceipt, displayCurrency);
+    const duplicates = await findDuplicateReceipts(normalizedReceipt);
+    const forceDuplicate = String(req.body.force_duplicate || '').toLowerCase() === 'true';
+    if (duplicates.length && !forceDuplicate) {
+      return res.status(409).json({
+        error: 'This receipt already exists. Do you want to upload anyway?',
+        duplicate: true,
+        duplicates: duplicates.map(duplicate => getPublicReceipt(duplicate)),
+      });
+    }
+
+    const conversion = await convertReceiptValues(normalizedReceipt, displayCurrency, rateMode);
     logConversion('upload', normalizedReceipt, conversion);
     const receiptPayload = { ...normalizedReceipt, ...conversion };
     const { data, error } = await insertReceiptWithSchemaFallback(receiptPayload);
@@ -561,6 +623,7 @@ The status must be Pending Approval.`,
 app.post('/api/receipts/reconvert', async (req, res) => {
   try {
     const displayCurrency = getDisplayCurrency(req.body.display_currency);
+    const rateMode = getConversionRateMode(req.body.conversion_rate_mode);
     if (!displayCurrency) return res.status(400).json({ error: 'display_currency must be a 3-letter ISO currency code.' });
     const { data: receipts, error } = await getSupabase().from('receipts').select('*');
     if (error) return res.status(500).json({ error: error.message });
@@ -568,7 +631,7 @@ app.post('/api/receipts/reconvert', async (req, res) => {
     const convertedReceipts = [];
     for (const receipt of (receipts || []) as Array<Record<string, any>>) {
       const normalized = normalizeReceipt(receipt);
-      const conversion = await convertReceiptValues(normalized, displayCurrency);
+      const conversion = await convertReceiptValues(normalized, displayCurrency, rateMode);
       logConversion('reconvert', receipt, conversion);
       const updateResult = await (getSupabase() as any)
         .from('receipts')
@@ -612,6 +675,7 @@ app.patch('/api/receipts/:id', async (req, res) => {
       ? await convertReceiptValues(
           normalized,
           getDisplayCurrency(req.body.display_currency || currentReceipt.display_currency) || 'MAD',
+          getConversionRateMode(req.body.conversion_rate_mode),
         )
       : {};
     if (originalValuesChanged) logConversion('update', currentReceipt, conversion as ConversionResult);
@@ -651,6 +715,27 @@ app.patch('/api/receipts/:id/status', async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
     res.json({ receipt: getPublicReceipt(data) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/receipts/:id/duplicates', async (req, res) => {
+  try {
+    const { data: keeper, error: keeperError } = await (getSupabase() as any)
+      .from('receipts')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (keeperError || !keeper) return res.status(404).json({ error: keeperError?.message || 'Receipt not found.' });
+
+    const duplicates = await findDuplicateReceipts(normalizeReceipt(keeper), req.params.id);
+    const duplicateIds = duplicates.map(duplicate => duplicate.id);
+    if (!duplicateIds.length) return res.json({ ok: true, deleted: 0 });
+
+    const { error } = await (getSupabase() as any).from('receipts').delete().in('id', duplicateIds);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true, deleted: duplicateIds.length });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

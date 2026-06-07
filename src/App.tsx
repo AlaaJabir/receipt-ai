@@ -47,7 +47,12 @@ const statuses: ReceiptStatus[] = ['Pending Approval', 'Approved', 'Rejected'];
 const dashboardCurrencies = ['MAD', 'EUR', 'USD', 'CHF', 'GBP', 'CAD', 'AED'];
 const CUSTOM_CURRENCY = 'CUSTOM';
 const chartColors = ['#F97316', '#14B8A6', '#60A5FA', '#A78BFA', '#FACC15', '#FB7185', '#34D399', '#94A3B8'];
-const defaultSettings: DashboardSettings = { defaultCurrency: 'MAD', vatLabel: 'TVA récupérable', compactMode: false };
+const defaultSettings: DashboardSettings = {
+  defaultCurrency: 'MAD',
+  conversionRateMode: 'latest',
+  vatLabel: 'TVA récupérable',
+  compactMode: false,
+};
 
 type Page = 'dashboard' | 'analytics' | 'settings';
 
@@ -135,6 +140,7 @@ export default function App() {
         defaultCurrency: isCurrencyCode(String(saved.defaultCurrency || '').toUpperCase())
           ? String(saved.defaultCurrency).toUpperCase()
           : 'MAD',
+        conversionRateMode: saved.conversionRateMode === 'historical' ? 'historical' : 'latest',
       };
     } catch {
       return defaultSettings;
@@ -152,6 +158,7 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [health, setHealth] = useState('checking');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const receiptRequestRef = useRef(0);
@@ -162,8 +169,9 @@ export default function App() {
       if (value && value !== 'All') params.set(key, value);
     });
     params.set('display_currency', settings.defaultCurrency);
+    params.set('conversion_rate_mode', settings.conversionRateMode);
     return params.toString();
-  }, [filters, settings.defaultCurrency]);
+  }, [filters, settings.conversionRateMode, settings.defaultCurrency]);
 
   const fetchReceipts = useCallback(async () => {
     const requestId = ++receiptRequestRef.current;
@@ -177,6 +185,7 @@ export default function App() {
       debugDashboard('fetch', {
         fetchedReceiptsCount: data.receipts?.length || 0,
         selectedCurrency: settings.defaultCurrency,
+        conversionRateMode: settings.conversionRateMode,
         selectedMonth: filters.month || 'all',
       });
       setReceipts(data.receipts || []);
@@ -192,7 +201,7 @@ export default function App() {
     } finally {
       if (requestId === receiptRequestRef.current) setLoading(false);
     }
-  }, [filters.month, queryString, settings.defaultCurrency]);
+  }, [filters.month, queryString, settings.conversionRateMode, settings.defaultCurrency]);
 
   useEffect(() => {
     fetchReceipts();
@@ -224,6 +233,7 @@ export default function App() {
     );
     debugDashboard('totals', {
       selectedCurrency: settings.defaultCurrency,
+      conversionRateMode: settings.conversionRateMode,
       selectedMonth: filters.month || 'all',
       totalsCalculationInput: converted.map(receipt => ({
         id: receipt.id,
@@ -265,13 +275,31 @@ export default function App() {
 
     setUploading(true);
     setError('');
+    setNotice('');
     try {
-      const formData = new FormData();
-      formData.append('receipt', file);
-      formData.append('display_currency', settings.defaultCurrency);
-      const res = await fetch('/api/receipts/process', { method: 'POST', body: formData });
-      const data = await readApiResponse(res);
-      if (!res.ok) throw new Error(data.error || 'Failed to process receipt.');
+      const uploadReceipt = async (forceDuplicate = false): Promise<any> => {
+        const formData = new FormData();
+        formData.append('receipt', file);
+        formData.append('display_currency', settings.defaultCurrency);
+        formData.append('conversion_rate_mode', settings.conversionRateMode);
+        if (forceDuplicate) formData.append('force_duplicate', 'true');
+
+        const res = await fetch('/api/receipts/process', { method: 'POST', body: formData });
+        const data = await readApiResponse(res);
+        if (res.status === 409 && data.duplicate) {
+          const confirmed = window.confirm('This receipt already exists. Do you want to upload anyway?');
+          if (!confirmed) return null;
+          return uploadReceipt(true);
+        }
+        if (!res.ok) throw new Error(data.error || 'Failed to process receipt.');
+        return data;
+      };
+
+      const data = await uploadReceipt();
+      if (!data) {
+        setNotice('Duplicate upload cancelled. The existing receipt was kept.');
+        return;
+      }
       setPage('dashboard');
       setSelectedReceipt(data.receipt);
       const receiptMonth = (data.receipt.receipt_date || data.receipt.date || '').slice(0, 7);
@@ -299,6 +327,7 @@ export default function App() {
         ht: updates.ht !== undefined ? numberValue(updates.ht) : undefined,
         tva: updates.tva !== undefined ? numberValue(updates.tva) : undefined,
         display_currency: settings.defaultCurrency,
+        conversion_rate_mode: settings.conversionRateMode,
       };
       const res = await fetch(`/api/receipts/${id}`, {
         method: 'PATCH',
@@ -349,6 +378,31 @@ export default function App() {
       await fetchReceipts();
     } catch (err: any) {
       setError(err.message || 'Delete failed.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteDuplicates() {
+    if (!selectedReceipt) return;
+    const confirmed = window.confirm(
+      `Keep the selected ${selectedReceipt.merchant || 'receipt'} and delete all other matching duplicates?`,
+    );
+    if (!confirmed) return;
+
+    setSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch(`/api/receipts/${selectedReceipt.id}/duplicates`, { method: 'DELETE' });
+      const data = await readApiResponse(res);
+      if (!res.ok) throw new Error(data.error || 'Failed to delete duplicates.');
+      setNotice(data.deleted
+        ? `${data.deleted} duplicate receipt${data.deleted === 1 ? '' : 's'} deleted. The selected receipt was kept.`
+        : 'No matching duplicates were found.');
+      await fetchReceipts();
+    } catch (err: any) {
+      setError(err.message || 'Duplicate cleanup failed.');
     } finally {
       setSaving(false);
     }
@@ -487,6 +541,9 @@ export default function App() {
                   className="h-10 w-44 rounded-lg border border-white/10 bg-white/5 px-3 text-sm uppercase outline-none focus:border-orange-500"
                 />
               )}
+              <span className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-400">
+                {settings.conversionRateMode === 'latest' ? 'Latest rates' : 'Historical rates'}
+              </span>
               <button
                 onClick={fetchReceipts}
                 disabled={loading}
@@ -513,6 +570,9 @@ export default function App() {
               <X size={18} className="mt-0.5 shrink-0" />
               <span>{error}</span>
             </div>
+          )}
+          {notice && (
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-200">{notice}</div>
           )}
           {currencyError && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">{currencyError}</div>
@@ -558,6 +618,7 @@ export default function App() {
                   onReject={() => updateStatus('Rejected')}
                   onPending={() => updateStatus('Pending Approval')}
                   onDelete={deleteReceipt}
+                  onDeleteDuplicates={deleteDuplicates}
                   onExport={exportPdf}
                   onSave={() => selectedReceipt && editForm && updateReceipt(selectedReceipt.id, editForm)}
                   setForm={setEditForm}
@@ -657,6 +718,25 @@ export default function App() {
                     onChange={event => setSettings(prev => ({ ...prev, vatLabel: event.target.value }))}
                     className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 outline-none focus:border-orange-500"
                   />
+                </label>
+                <label className="grid gap-2 text-sm">
+                  <span className="text-slate-400">Conversion rate mode</span>
+                  <select
+                    value={settings.conversionRateMode}
+                    onChange={event => setSettings(prev => ({
+                      ...prev,
+                      conversionRateMode: event.target.value as DashboardSettings['conversionRateMode'],
+                    }))}
+                    className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 outline-none focus:border-orange-500"
+                  >
+                    <option value="latest">Latest rate (default)</option>
+                    <option value="historical">Historical receipt date rate</option>
+                  </select>
+                  <span className="text-xs text-slate-500">
+                    {settings.conversionRateMode === 'latest'
+                      ? 'Uses the latest published API rate and ignores receipt dates.'
+                      : 'Uses each receipt date. Receipts without an available dated rate are excluded.'}
+                  </span>
                 </label>
                 <label className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 p-4 text-sm">
                   <span>
@@ -898,6 +978,7 @@ function DetailsPanel({
   onReject,
   onPending,
   onDelete,
+  onDeleteDuplicates,
   onExport,
   onSave,
   setForm,
@@ -911,6 +992,7 @@ function DetailsPanel({
   onReject: () => void;
   onPending: () => void;
   onDelete: () => void;
+  onDeleteDuplicates: () => void;
   onExport: () => void;
   onSave: () => void;
   setForm: React.Dispatch<React.SetStateAction<ReceiptFormState | null>>;
@@ -1018,10 +1100,13 @@ function DetailsPanel({
             <button onClick={onReject} disabled={saving} className="rounded-lg bg-red-500/15 px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/25">Reject</button>
             <button onClick={onPending} disabled={saving} className="rounded-lg bg-sky-500/15 px-3 py-2 text-sm text-sky-300 transition hover:bg-sky-500/25">Pending</button>
           </div>
-          <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="mt-3 grid grid-cols-3 gap-2">
             <button onClick={onExport} className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm transition hover:bg-white/10">
               <Download size={16} />
               Export PDF
+            </button>
+            <button onClick={onDeleteDuplicates} disabled={saving} className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300 transition hover:bg-amber-500/20 disabled:opacity-60">
+              Delete duplicates
             </button>
             <button onClick={onDelete} disabled={saving} className="flex items-center justify-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/20">
               <Trash2 size={16} />

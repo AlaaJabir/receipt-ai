@@ -53,6 +53,7 @@ export interface ReceiptFilters {
 
 export interface DashboardSettings {
   defaultCurrency: string;
+  conversionRateMode: 'latest' | 'historical';
   vatLabel: string;
   compactMode: boolean;
 }
