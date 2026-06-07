@@ -79,12 +79,12 @@ function receiptToForm(receipt: Receipt): ReceiptFormState {
   return {
     merchant: receipt.merchant || '',
     transaction_ref: receipt.transaction_ref || '',
-    date: receipt.date || '',
+    date: receipt.receipt_date || receipt.date || '',
     category: receipt.category || 'Other',
-    total: receipt.total === null ? '' : String(receipt.total),
-    currency: receipt.currency || 'MAD',
-    ht: receipt.ht === null ? '' : String(receipt.ht),
-    tva: receipt.tva === null ? '' : String(receipt.tva),
+    total: receipt.original_total === null ? '' : String(receipt.original_total ?? receipt.total ?? ''),
+    currency: receipt.original_currency || receipt.currency || 'MAD',
+    ht: receipt.original_ht === null ? '' : String(receipt.original_ht ?? receipt.ht ?? ''),
+    tva: receipt.original_tva === null ? '' : String(receipt.original_tva ?? receipt.tva ?? ''),
     insight: receipt.insight || '',
     status: receipt.status || 'Pending Approval',
   };
@@ -116,6 +116,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [health, setHealth] = useState('checking');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const conversionCurrencyRef = useRef('');
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
@@ -155,6 +156,30 @@ export default function App() {
   }, [settings]);
 
   useEffect(() => {
+    const displayCurrency = settings.defaultCurrency.trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(displayCurrency) || conversionCurrencyRef.current === displayCurrency) return;
+    conversionCurrencyRef.current = displayCurrency;
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const res = await fetch('/api/receipts/reconvert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ display_currency: displayCurrency }),
+        });
+        const data = await readApiResponse(res);
+        if (!res.ok) throw new Error(data.error || 'Failed to update currency conversions.');
+        setReceipts(data.receipts || []);
+        setSelectedReceipt(current => data.receipts?.find((receipt: Receipt) => receipt.id === current?.id) || data.receipts?.[0] || null);
+      } catch (err: any) {
+        setError(err.message || 'Currency conversion failed.');
+      }
+    }, 500);
+
+    return () => window.clearTimeout(timer);
+  }, [settings.defaultCurrency]);
+
+  useEffect(() => {
     fetch('/api/health')
       .then(readApiResponse)
       .then(data => setHealth(data.supabase === 'ok' ? 'connected' : data.supabase || 'error'))
@@ -162,32 +187,39 @@ export default function App() {
   }, []);
 
   const totals = useMemo(() => {
-    const total = receipts.reduce((sum, receipt) => sum + Number(receipt.total || 0), 0);
-    const tva = receipts.reduce((sum, receipt) => sum + Number(receipt.tva || 0), 0);
-    const average = receipts.length ? total / receipts.length : 0;
+    const converted = receipts.filter(receipt =>
+      receipt.display_currency === settings.defaultCurrency
+      && receipt.exchange_rate_source !== 'failed'
+      && receipt.converted_total !== null,
+    );
+    const total = converted.reduce((sum, receipt) => sum + Number(receipt.converted_total), 0);
+    const tva = converted.reduce((sum, receipt) => sum + Number(receipt.converted_tva || 0), 0);
+    const average = converted.length ? total / converted.length : 0;
     const counts = statuses.reduce(
       (acc, status) => ({ ...acc, [status]: receipts.filter(receipt => receipt.status === status).length }),
       {} as Record<ReceiptStatus, number>,
     );
-    return { total, tva, average, counts };
-  }, [receipts]);
+    return { total, tva, average, counts, excluded: receipts.length - converted.length };
+  }, [receipts, settings.defaultCurrency]);
 
   const categoryData = useMemo(() => {
     const grouped = new Map<string, number>();
-    receipts.forEach(receipt => grouped.set(receipt.category || 'Other', (grouped.get(receipt.category || 'Other') || 0) + Number(receipt.total || 0)));
+    receipts
+      .filter(receipt => receipt.display_currency === settings.defaultCurrency && receipt.converted_total !== null)
+      .forEach(receipt => grouped.set(receipt.category || 'Other', (grouped.get(receipt.category || 'Other') || 0) + Number(receipt.converted_total)));
     return Array.from(grouped.entries()).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-  }, [receipts]);
+  }, [receipts, settings.defaultCurrency]);
 
   const monthlyTrend = useMemo(() => {
     const grouped = new Map<string, number>();
-    receipts.forEach(receipt => {
-      const source = receipt.date || receipt.created_at;
+    receipts.filter(receipt => receipt.display_currency === settings.defaultCurrency && receipt.converted_total !== null).forEach(receipt => {
+      const source = receipt.receipt_date || receipt.date || receipt.created_at;
       const parsed = new Date(source || '');
       const label = Number.isNaN(parsed.getTime()) ? 'Unknown' : parsed.toISOString().slice(0, 7);
-      grouped.set(label, (grouped.get(label) || 0) + Number(receipt.total || 0));
+      grouped.set(label, (grouped.get(label) || 0) + Number(receipt.converted_total));
     });
     return Array.from(grouped.entries()).map(([month, total]) => ({ month, total })).sort((a, b) => a.month.localeCompare(b.month));
-  }, [receipts]);
+  }, [receipts, settings.defaultCurrency]);
 
   async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -199,6 +231,7 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append('receipt', file);
+      formData.append('display_currency', settings.defaultCurrency);
       const res = await fetch('/api/receipts/process', { method: 'POST', body: formData });
       const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to process receipt.');
@@ -221,6 +254,7 @@ export default function App() {
         total: updates.total !== undefined ? numberValue(updates.total) : undefined,
         ht: updates.ht !== undefined ? numberValue(updates.ht) : undefined,
         tva: updates.tva !== undefined ? numberValue(updates.tva) : undefined,
+        display_currency: settings.defaultCurrency,
       };
       const res = await fetch(`/api/receipts/${id}`, {
         method: 'PATCH',
@@ -390,6 +424,11 @@ export default function App() {
             <div className="flex items-start gap-3 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
               <X size={18} className="mt-0.5 shrink-0" />
               <span>{error}</span>
+            </div>
+          )}
+          {totals.excluded > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
+              {totals.excluded} receipt{totals.excluded === 1 ? '' : 's'} excluded from totals because conversion to {settings.defaultCurrency} is unavailable or pending.
             </div>
           )}
 
@@ -647,7 +686,7 @@ function UploadZone({ uploading, onPick }: { uploading: boolean; onPick: () => v
         {uploading ? <Loader2 className="animate-spin" size={26} /> : <Upload size={26} />}
       </div>
       <p className="mt-4 text-lg font-semibold">{uploading ? 'Extracting receipt data...' : 'Upload JPG, PNG, or PDF receipt'}</p>
-      <p className="mt-1 text-sm text-slate-500">Gemini extracts structured data and saves it to Supabase.</p>
+      <p className="mt-1 text-sm text-slate-500">OpenAI extracts the printed values, then ReceiptAI converts them using dated exchange rates.</p>
     </button>
   );
 }
@@ -706,7 +745,14 @@ function ReceiptTable({
           </span>
           <span className="truncate text-slate-300">{receipt.category}</span>
           <StatusPill status={receipt.status} />
-          <span className="text-right font-semibold">{money(receipt.total, receipt.currency || currency)}</span>
+          <span className="text-right">
+            <span className="block font-semibold">{money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</span>
+            {receipt.converted_total !== null && receipt.display_currency === currency ? (
+              <span className="block text-xs text-emerald-300">{money(receipt.converted_total, receipt.display_currency)}</span>
+            ) : (
+              <span className="block text-xs text-amber-300">Conversion unavailable</span>
+            )}
+          </span>
           <ChevronRight size={17} className="text-slate-500" />
         </button>
       ))}
@@ -794,17 +840,28 @@ function DetailsPanel({
         <>
           <div className="mt-6 grid grid-cols-2 gap-3">
             <Detail label="Category" value={receipt.category} />
-            <Detail label="Currency" value={receipt.currency || 'MAD'} />
-            <Detail label="Montant HT" value={money(receipt.ht, receipt.currency || 'MAD')} />
-            <Detail label="TVA" value={money(receipt.tva, receipt.currency || 'MAD')} />
+            <Detail label="Original currency" value={receipt.original_currency || receipt.currency || 'MAD'} />
+            <Detail label="Montant HT" value={money(receipt.original_ht ?? receipt.ht, receipt.original_currency || receipt.currency || 'MAD')} />
+            <Detail label="TVA" value={money(receipt.original_tva ?? receipt.tva, receipt.original_currency || receipt.currency || 'MAD')} />
+            <Detail
+              label="Exchange rate"
+              value={receipt.exchange_rate
+                ? `${receipt.exchange_rate} (${receipt.exchange_rate_source}, ${receipt.exchange_rate_date || 'no date'})`
+                : 'Unavailable'}
+            />
           </div>
           <div className="mt-5 rounded-lg border border-orange-500/20 bg-orange-500/10 p-4">
-            <p className="text-xs uppercase tracking-wide text-orange-300">Total TTC</p>
-            <p className="mt-1 text-3xl font-bold">{money(receipt.total, receipt.currency || 'MAD')}</p>
+            <p className="text-xs uppercase tracking-wide text-orange-300">Original total</p>
+            <p className="mt-1 text-3xl font-bold">{money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</p>
+            {receipt.converted_total !== null ? (
+              <p className="mt-2 text-sm text-emerald-300">Converted: {money(receipt.converted_total, receipt.display_currency || 'MAD')}</p>
+            ) : (
+              <p className="mt-2 text-sm text-amber-300">{receipt.conversion_warning || 'Conversion unavailable. This receipt is excluded from dashboard totals.'}</p>
+            )}
           </div>
           {receipt.insight && (
             <div className="mt-4 rounded-lg border border-white/10 bg-black/25 p-4">
-              <p className="text-xs uppercase tracking-wide text-slate-500">Gemini insight</p>
+              <p className="text-xs uppercase tracking-wide text-slate-500">AI insight</p>
               <p className="mt-2 text-sm leading-6 text-slate-300">{receipt.insight}</p>
             </div>
           )}
@@ -853,6 +910,7 @@ function StatusPill({ status }: { status: ReceiptStatus }) {
     Rejected: 'bg-red-500/15 text-red-300',
     'Pending Approval': 'bg-sky-500/15 text-sky-300',
   };
+
   return <span className={`inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-medium ${styles[status]}`}>{status}</span>;
 }
 

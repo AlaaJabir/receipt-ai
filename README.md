@@ -4,6 +4,8 @@ ReceiptAI is a production-ready AI receipt and expense dashboard built with Reac
 
 Users can upload JPG, PNG, or PDF receipts. The backend validates the file, sends it to OpenAI, normalizes the extracted JSON, stores it in Supabase, and returns live dashboard data with filters, approval workflow, editing, deleting, analytics, settings, and PDF export.
 
+ReceiptAI converts extracted receipt values with the date-aware [Frankfurter](https://frankfurter.dev/) exchange-rate API. Historical rates are preferred; the latest available rate is used as a fallback. Receipts with failed conversions are excluded from dashboard totals rather than mixed across currencies.
+
 ## Setup
 
 1. Install dependencies:
@@ -28,6 +30,7 @@ OPENAI_API_KEY=
 supabase/migrations/20260604000000_create_receipts.sql
 supabase/migrations/20260607000000_add_receipt_file_metadata.sql
 supabase/migrations/20260607010000_sync_receipts_schema.sql
+supabase/migrations/20260607020000_add_currency_conversion.sql
 ```
 
 You can paste it into the Supabase SQL editor or run it with the Supabase CLI.

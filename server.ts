@@ -16,6 +16,7 @@ const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf']);
 const CATEGORIES = ['Meals', 'Transport', 'Software', 'Office', 'Fuel', 'Travel', 'Utilities', 'Other'];
 const STATUSES = ['Pending Approval', 'Approved', 'Rejected'];
+const EXCHANGE_RATE_API_URL = 'https://api.frankfurter.dev/v2/rate';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -72,6 +73,11 @@ function normalizeCurrency(value: unknown): string {
   return currency || 'MAD';
 }
 
+function normalizeDate(value: unknown): string | null {
+  const parsed = parseReceiptDate(value ? String(value) : null);
+  return parsed ? parsed.toISOString().slice(0, 10) : null;
+}
+
 function normalizeCategory(value: unknown): string {
   const raw = String(value || '').trim().toLowerCase();
   const match = CATEGORIES.find(category => category.toLowerCase() === raw);
@@ -84,20 +90,111 @@ function normalizeStatus(value: unknown): string {
 }
 
 function normalizeReceipt(payload: Record<string, unknown>, file?: Express.Multer.File) {
+  const originalCurrency = normalizeCurrency(payload.original_currency ?? payload.currency);
+  const originalTotal = parseMoney(payload.original_total ?? payload.total);
+  const originalHt = parseMoney(payload.original_ht ?? payload.ht);
+  const originalTva = parseMoney(payload.original_tva ?? payload.tva);
+  const receiptDate = normalizeDate(payload.receipt_date ?? payload.date);
+
   return {
     merchant: payload.merchant ? String(payload.merchant).trim() : null,
     transaction_ref: payload.transaction_ref ? String(payload.transaction_ref).trim() : null,
-    date: payload.date ? String(payload.date).trim() : null,
+    date: receiptDate,
+    receipt_date: receiptDate,
     category: normalizeCategory(payload.category),
-    total: parseMoney(payload.total),
-    currency: normalizeCurrency(payload.currency),
-    ht: parseMoney(payload.ht),
-    tva: parseMoney(payload.tva),
+    total: originalTotal,
+    currency: originalCurrency,
+    ht: originalHt,
+    tva: originalTva,
+    original_currency: originalCurrency,
+    original_total: originalTotal,
+    original_ht: originalHt,
+    original_tva: originalTva,
     insight: payload.insight ? String(payload.insight).trim() : null,
     status: normalizeStatus(payload.status),
     file_name: file?.originalname || null,
     file_type: file?.mimetype || null,
   };
+}
+
+type ConversionResult = {
+  display_currency: string;
+  converted_total: number | null;
+  converted_ht: number | null;
+  converted_tva: number | null;
+  exchange_rate: number | null;
+  exchange_rate_date: string | null;
+  exchange_rate_source: 'historical' | 'latest' | 'identity' | 'failed';
+};
+
+function roundMoney(value: number | null, rate: number): number | null {
+  return value === null ? null : Math.round(value * rate * 100) / 100;
+}
+
+async function requestExchangeRate(base: string, quote: string, date?: string) {
+  const url = new URL(`${EXCHANGE_RATE_API_URL}/${encodeURIComponent(base)}/${encodeURIComponent(quote)}`);
+  if (date) url.searchParams.set('date', date);
+
+  const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!response.ok) throw new Error(`Exchange-rate API returned ${response.status}.`);
+
+  const data = await response.json() as { rate?: number; date?: string };
+  if (!Number.isFinite(data.rate) || !data.date) throw new Error('Exchange-rate API returned an invalid rate.');
+  return { rate: Number(data.rate), date: data.date };
+}
+
+async function convertReceiptValues(
+  receipt: ReturnType<typeof normalizeReceipt>,
+  displayCurrencyValue: unknown,
+): Promise<ConversionResult> {
+  const displayCurrency = normalizeCurrency(displayCurrencyValue || 'MAD');
+  const originalCurrency = receipt.original_currency;
+
+  if (originalCurrency === displayCurrency) {
+    return {
+      display_currency: displayCurrency,
+      converted_total: receipt.original_total,
+      converted_ht: receipt.original_ht,
+      converted_tva: receipt.original_tva,
+      exchange_rate: 1,
+      exchange_rate_date: receipt.receipt_date,
+      exchange_rate_source: 'identity',
+    };
+  }
+
+  try {
+    let rateResult: { rate: number; date: string };
+    let source: ConversionResult['exchange_rate_source'] = 'historical';
+
+    try {
+      if (!receipt.receipt_date) throw new Error('Receipt date unavailable.');
+      rateResult = await requestExchangeRate(originalCurrency, displayCurrency, receipt.receipt_date);
+    } catch {
+      rateResult = await requestExchangeRate(originalCurrency, displayCurrency);
+      source = 'latest';
+    }
+
+    return {
+      display_currency: displayCurrency,
+      converted_total: roundMoney(receipt.original_total, rateResult.rate),
+      converted_ht: roundMoney(receipt.original_ht, rateResult.rate),
+      converted_tva: roundMoney(receipt.original_tva, rateResult.rate),
+      exchange_rate: rateResult.rate,
+      exchange_rate_date: rateResult.date,
+      exchange_rate_source: source,
+    };
+  } catch (error) {
+    console.error(`Currency conversion failed for ${originalCurrency}/${displayCurrency}:`, error);
+    return {
+      display_currency: displayCurrency,
+      converted_total: null,
+      converted_ht: null,
+      converted_tva: null,
+      exchange_rate: null,
+      exchange_rate_date: null,
+      exchange_rate_source: 'failed',
+    };
+  }
 }
 
 function getMissingColumn(message: string): string | null {
@@ -171,11 +268,28 @@ function matchesDateFilters(receipt: any, month?: string, from?: string, to?: st
 }
 
 function getPublicReceipt(receipt: any) {
+  const numericFields = [
+    'total',
+    'ht',
+    'tva',
+    'original_total',
+    'original_ht',
+    'original_tva',
+    'converted_total',
+    'converted_ht',
+    'converted_tva',
+    'exchange_rate',
+  ];
+  const normalized = { ...receipt };
+  for (const field of numericFields) {
+    normalized[field] = receipt[field] === null || receipt[field] === undefined ? null : Number(receipt[field]);
+  }
+
   return {
-    ...receipt,
-    total: receipt.total === null ? null : Number(receipt.total),
-    ht: receipt.ht === null ? null : Number(receipt.ht),
-    tva: receipt.tva === null ? null : Number(receipt.tva),
+    ...normalized,
+    conversion_warning: receipt.exchange_rate_source === 'failed'
+      ? `Could not convert ${receipt.original_currency || receipt.currency || 'receipt currency'} to ${receipt.display_currency || 'dashboard currency'}.`
+      : null,
   };
 }
 
@@ -268,9 +382,11 @@ app.post('/api/receipts/process', upload.single('receipt'), async (req, res) => 
           content: [
             {
               type: 'input_text',
-              text: `You are ReceiptAI, a precise finance data extractor for Moroccan business receipts.
+              text: `You are ReceiptAI, a precise finance data extractor for business receipts.
 Use null for missing fields. Numeric fields must be numbers, not strings.
 Normalize DH, DHS, and dirham to MAD when possible.
+Extract monetary values exactly as printed. Never convert currencies.
+receipt_date must be YYYY-MM-DD when the date is unambiguous, otherwise null.
 The category must be exactly one of: Meals, Transport, Software, Office, Fuel, Travel, Utilities, Other.
 The status must be Pending Approval.`,
             },
@@ -289,16 +405,16 @@ The status must be Pending Approval.`,
             properties: {
               merchant: { type: ['string', 'null'] },
               transaction_ref: { type: ['string', 'null'] },
-              date: { type: ['string', 'null'] },
+              receipt_date: { type: ['string', 'null'] },
               category: { type: 'string', enum: CATEGORIES },
-              total: { type: ['number', 'null'] },
-              currency: { type: ['string', 'null'] },
-              ht: { type: ['number', 'null'] },
-              tva: { type: ['number', 'null'] },
+              original_total: { type: ['number', 'null'] },
+              original_currency: { type: ['string', 'null'] },
+              original_ht: { type: ['number', 'null'] },
+              original_tva: { type: ['number', 'null'] },
               insight: { type: ['string', 'null'] },
               status: { type: 'string', enum: ['Pending Approval'] },
             },
-            required: ['merchant', 'transaction_ref', 'date', 'category', 'total', 'currency', 'ht', 'tva', 'insight', 'status'],
+            required: ['merchant', 'transaction_ref', 'receipt_date', 'category', 'original_total', 'original_currency', 'original_ht', 'original_tva', 'insight', 'status'],
           },
         },
       },
@@ -312,7 +428,9 @@ The status must be Pending Approval.`,
       return res.status(502).json({ error: 'OpenAI returned invalid JSON.', rawText: aiText });
     }
 
-    const receiptPayload = normalizeReceipt({ ...parsed, status: 'Pending Approval' }, file);
+    const normalizedReceipt = normalizeReceipt({ ...parsed, status: 'Pending Approval' }, file);
+    const conversion = await convertReceiptValues(normalizedReceipt, req.body.display_currency);
+    const receiptPayload = { ...normalizedReceipt, ...conversion };
     const { data, error } = await insertReceiptWithSchemaFallback(receiptPayload);
 
     if (error) return res.status(500).json({ error: `Failed to save to Supabase: ${error.message}` });
@@ -325,6 +443,32 @@ The status must be Pending Approval.`,
   }
 });
 
+app.post('/api/receipts/reconvert', async (req, res) => {
+  try {
+    const displayCurrency = normalizeCurrency(req.body.display_currency || 'MAD');
+    const { data: receipts, error } = await getSupabase().from('receipts').select('*');
+    if (error) return res.status(500).json({ error: error.message });
+
+    const convertedReceipts = [];
+    for (const receipt of (receipts || []) as Array<Record<string, any>>) {
+      const normalized = normalizeReceipt(receipt);
+      const conversion = await convertReceiptValues(normalized, displayCurrency);
+      const updateResult = await (getSupabase() as any)
+        .from('receipts')
+        .update({ ...conversion, updated_at: new Date().toISOString() })
+        .eq('id', receipt.id)
+        .select()
+        .single();
+      if (updateResult.error) return res.status(500).json({ error: updateResult.error.message });
+      convertedReceipts.push(getPublicReceipt(updateResult.data));
+    }
+
+    res.json({ receipts: convertedReceipts });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.patch('/api/receipts/:id', async (req, res) => {
   try {
     const allowed = ['merchant', 'transaction_ref', 'date', 'category', 'total', 'currency', 'ht', 'tva', 'insight', 'status'];
@@ -332,9 +476,27 @@ app.patch('/api/receipts/:id', async (req, res) => {
     for (const key of allowed) {
       if (key in req.body) updates[key] = req.body[key];
     }
-    const normalized = normalizeReceipt(updates);
+    const currentResult = await (getSupabase() as any).from('receipts').select('*').eq('id', req.params.id).single();
+    if (currentResult.error) return res.status(404).json({ error: currentResult.error.message });
+    if (!currentResult.data) return res.status(404).json({ error: 'Receipt not found.' });
+    const currentReceipt = currentResult.data as Record<string, any>;
+
+    const originalValuesChanged = ['date', 'total', 'currency', 'ht', 'tva'].some(key => key in updates);
+    const normalized = normalizeReceipt({
+      ...currentReceipt,
+      ...updates,
+      original_total: updates.total ?? currentReceipt.original_total,
+      original_currency: updates.currency ?? currentReceipt.original_currency,
+      original_ht: updates.ht ?? currentReceipt.original_ht,
+      original_tva: updates.tva ?? currentReceipt.original_tva,
+      receipt_date: updates.date ?? currentReceipt.receipt_date,
+    });
+    const conversion = originalValuesChanged
+      ? await convertReceiptValues(normalized, req.body.display_currency || currentReceipt.display_currency)
+      : {};
     const payload = {
       ...normalized,
+      ...conversion,
       file_name: undefined,
       file_type: undefined,
       updated_at: new Date().toISOString(),
@@ -392,7 +554,8 @@ app.get('/api/receipts/:id/export-pdf', async (req, res) => {
     const receipt = getPublicReceipt(data);
     const doc = new jsPDF();
     const ref = (receipt.transaction_ref || receipt.id || '').slice(0, 12).toUpperCase();
-    const currency = receipt.currency || 'MAD';
+    const originalCurrency = receipt.original_currency || receipt.currency || 'MAD';
+    const displayCurrency = receipt.display_currency || 'MAD';
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(22);
@@ -418,10 +581,18 @@ app.get('/api/receipts/:id/export-pdf', async (req, res) => {
 
     doc.line(30, 102, 180, 102);
     doc.setFont('helvetica', 'bold');
-    doc.text(`HT: ${receipt.ht ?? '---'} ${currency}`, 30, 116);
-    doc.text(`TVA: ${receipt.tva ?? '---'} ${currency}`, 30, 126);
+    doc.text(`Original HT: ${receipt.original_ht ?? receipt.ht ?? '---'} ${originalCurrency}`, 30, 116);
+    doc.text(`Original TVA: ${receipt.original_tva ?? receipt.tva ?? '---'} ${originalCurrency}`, 30, 126);
     doc.setFontSize(15);
-    doc.text(`Total TTC: ${receipt.total ?? '---'} ${currency}`, 30, 138);
+    doc.text(`Original total: ${receipt.original_total ?? receipt.total ?? '---'} ${originalCurrency}`, 30, 138);
+    doc.setFontSize(11);
+    doc.text(
+      receipt.converted_total === null
+        ? 'Converted total: unavailable'
+        : `Converted total: ${receipt.converted_total} ${displayCurrency}`,
+      30,
+      148,
+    );
 
     if (receipt.insight) {
       doc.setFontSize(11);
