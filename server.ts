@@ -81,6 +81,15 @@ function normalizeCurrency(value: unknown): string {
   return currency || 'MAD';
 }
 
+function getDisplayCurrency(value: unknown): string | null {
+  const currency = normalizeCurrency(value || 'MAD');
+  return /^[A-Z]{3}$/.test(currency) ? currency : null;
+}
+
+function debugServer(label: string, details: unknown) {
+  if (process.env.NODE_ENV !== 'production') console.debug(`[ReceiptAI:${label}]`, details);
+}
+
 function normalizeDate(value: unknown): string | null {
   const parsed = parseReceiptDate(value ? String(value) : null);
   return parsed ? parsed.toISOString().slice(0, 10) : null;
@@ -328,7 +337,7 @@ function parseReceiptDate(dateText: string | null | undefined): Date | null {
 
 function matchesDateFilters(receipt: any, month?: string, from?: string, to?: string) {
   if (!month && !from && !to) return true;
-  const parsed = parseReceiptDate(receipt.date) || parseReceiptDate(receipt.created_at);
+  const parsed = parseReceiptDate(receipt.receipt_date) || parseReceiptDate(receipt.date) || parseReceiptDate(receipt.created_at);
   if (!parsed) return false;
 
   if (month) {
@@ -407,7 +416,8 @@ app.get('/api/health', async (_req, res) => {
 app.get('/api/receipts', async (req, res) => {
   try {
     const { month, category, status, search, from, to, display_currency } = req.query as Record<string, string | undefined>;
-    const displayCurrency = normalizeCurrency(display_currency || 'MAD');
+    const displayCurrency = getDisplayCurrency(display_currency);
+    if (!displayCurrency) return res.status(400).json({ error: 'display_currency must be a 3-letter ISO currency code.' });
     let query = getSupabase().from('receipts').select('*').order('created_at', { ascending: false });
 
     if (category && category !== 'All') query = query.eq('category', category);
@@ -426,6 +436,18 @@ app.get('/api/receipts', async (req, res) => {
       filteredReceipts.map(receipt => ensureReceiptConversion(receipt, displayCurrency)),
     );
     const receipts = convertedReceipts.map(getPublicReceipt);
+    debugServer('fetch', {
+      fetchedReceiptsCount: receipts.length,
+      selectedCurrency: displayCurrency,
+      selectedMonth: month || 'all',
+      statusCounts: STATUSES.reduce(
+        (counts, receiptStatus) => ({
+          ...counts,
+          [receiptStatus]: receipts.filter(receipt => receipt.status === receiptStatus).length,
+        }),
+        {},
+      ),
+    });
 
     res.json({ receipts });
   } catch (err: any) {
@@ -518,8 +540,10 @@ The status must be Pending Approval.`,
       return res.status(502).json({ error: 'OpenAI returned invalid JSON.', rawText: aiText });
     }
 
+    const displayCurrency = getDisplayCurrency(req.body.display_currency);
+    if (!displayCurrency) return res.status(400).json({ error: 'display_currency must be a 3-letter ISO currency code.' });
     const normalizedReceipt = normalizeReceipt({ ...parsed, status: 'Pending Approval' }, file);
-    const conversion = await convertReceiptValues(normalizedReceipt, req.body.display_currency);
+    const conversion = await convertReceiptValues(normalizedReceipt, displayCurrency);
     logConversion('upload', normalizedReceipt, conversion);
     const receiptPayload = { ...normalizedReceipt, ...conversion };
     const { data, error } = await insertReceiptWithSchemaFallback(receiptPayload);
@@ -536,7 +560,8 @@ The status must be Pending Approval.`,
 
 app.post('/api/receipts/reconvert', async (req, res) => {
   try {
-    const displayCurrency = normalizeCurrency(req.body.display_currency || 'MAD');
+    const displayCurrency = getDisplayCurrency(req.body.display_currency);
+    if (!displayCurrency) return res.status(400).json({ error: 'display_currency must be a 3-letter ISO currency code.' });
     const { data: receipts, error } = await getSupabase().from('receipts').select('*');
     if (error) return res.status(500).json({ error: error.message });
 
@@ -584,7 +609,10 @@ app.patch('/api/receipts/:id', async (req, res) => {
       receipt_date: updates.date ?? currentReceipt.receipt_date,
     });
     const conversion = originalValuesChanged
-      ? await convertReceiptValues(normalized, req.body.display_currency || currentReceipt.display_currency)
+      ? await convertReceiptValues(
+          normalized,
+          getDisplayCurrency(req.body.display_currency || currentReceipt.display_currency) || 'MAD',
+        )
       : {};
     if (originalValuesChanged) logConversion('update', currentReceipt, conversion as ConversionResult);
     const payload = {

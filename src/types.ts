@@ -12,6 +12,7 @@ export type ReceiptCategory =
 
 export interface Receipt {
   id: string;
+  user_id: string | null;
   merchant: string | null;
   transaction_ref: string | null;
   date: string | null;

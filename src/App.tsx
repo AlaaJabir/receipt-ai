@@ -45,6 +45,7 @@ import type {
 const categories: ReceiptCategory[] = ['Meals', 'Transport', 'Software', 'Office', 'Fuel', 'Travel', 'Utilities', 'Other'];
 const statuses: ReceiptStatus[] = ['Pending Approval', 'Approved', 'Rejected'];
 const dashboardCurrencies = ['MAD', 'EUR', 'USD', 'CHF', 'GBP', 'CAD', 'AED'];
+const CUSTOM_CURRENCY = 'CUSTOM';
 const chartColors = ['#F97316', '#14B8A6', '#60A5FA', '#A78BFA', '#FACC15', '#FB7185', '#34D399', '#94A3B8'];
 const defaultSettings: DashboardSettings = { defaultCurrency: 'MAD', vatLabel: 'TVA récupérable', compactMode: false };
 
@@ -52,6 +53,16 @@ type Page = 'dashboard' | 'analytics' | 'settings';
 
 function getCurrentMonth() {
   return new Date().toISOString().slice(0, 7);
+}
+
+function isCurrencyCode(value: string) {
+  return /^[A-Z]{3}$/.test(value);
+}
+
+function debugDashboard(label: string, details: unknown) {
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    console.debug(`[ReceiptAI:${label}]`, details);
+  }
 }
 
 function money(value: number | null | undefined, currency = 'MAD') {
@@ -101,21 +112,41 @@ export default function App() {
   const [page, setPage] = useState<Page>('dashboard');
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
-  const [filters, setFilters] = useState<ReceiptFilters>({
-    month: getCurrentMonth(),
-    category: 'All',
-    status: 'All',
-    search: '',
-    from: '',
-    to: '',
+  const [filters, setFilters] = useState<ReceiptFilters>(() => {
+    const defaults: ReceiptFilters = {
+      month: getCurrentMonth(),
+      category: 'All',
+      status: 'All',
+      search: '',
+      from: '',
+      to: '',
+    };
+    try {
+      return { ...defaults, ...JSON.parse(localStorage.getItem('receiptai-filters') || '{}') };
+    } catch {
+      return defaults;
+    }
   });
   const [settings, setSettings] = useState<DashboardSettings>(() => {
     try {
-      return { ...defaultSettings, ...JSON.parse(localStorage.getItem('receiptai-settings') || '{}') };
+      const saved = { ...defaultSettings, ...JSON.parse(localStorage.getItem('receiptai-settings') || '{}') };
+      return {
+        ...saved,
+        defaultCurrency: isCurrencyCode(String(saved.defaultCurrency || '').toUpperCase())
+          ? String(saved.defaultCurrency).toUpperCase()
+          : 'MAD',
+      };
     } catch {
       return defaultSettings;
     }
   });
+  const [customCurrency, setCustomCurrency] = useState(() =>
+    dashboardCurrencies.includes(settings.defaultCurrency) ? '' : settings.defaultCurrency,
+  );
+  const [currencyMode, setCurrencyMode] = useState(() =>
+    dashboardCurrencies.includes(settings.defaultCurrency) ? settings.defaultCurrency : CUSTOM_CURRENCY,
+  );
+  const [currencyError, setCurrencyError] = useState('');
   const [editForm, setEditForm] = useState<ReceiptFormState | null>(null);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -143,6 +174,11 @@ export default function App() {
       const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to load receipts.');
       if (requestId !== receiptRequestRef.current) return;
+      debugDashboard('fetch', {
+        fetchedReceiptsCount: data.receipts?.length || 0,
+        selectedCurrency: settings.defaultCurrency,
+        selectedMonth: filters.month || 'all',
+      });
       setReceipts(data.receipts || []);
       setSelectedReceipt(current => {
         if (current && data.receipts?.some((receipt: Receipt) => receipt.id === current.id)) {
@@ -156,7 +192,7 @@ export default function App() {
     } finally {
       if (requestId === receiptRequestRef.current) setLoading(false);
     }
-  }, [queryString]);
+  }, [filters.month, queryString, settings.defaultCurrency]);
 
   useEffect(() => {
     fetchReceipts();
@@ -165,6 +201,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('receiptai-settings', JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    localStorage.setItem('receiptai-filters', JSON.stringify(filters));
+  }, [filters]);
 
   useEffect(() => {
     fetch('/api/health')
@@ -182,8 +222,22 @@ export default function App() {
       (acc, status) => ({ ...acc, [status]: receipts.filter(receipt => receipt.status === status).length }),
       {} as Record<ReceiptStatus, number>,
     );
+    debugDashboard('totals', {
+      selectedCurrency: settings.defaultCurrency,
+      selectedMonth: filters.month || 'all',
+      totalsCalculationInput: converted.map(receipt => ({
+        id: receipt.id,
+        converted_total: receipt.converted_total,
+        converted_tva: receipt.converted_tva,
+      })),
+      total,
+      tva,
+      approved: counts.Approved || 0,
+      pending: counts['Pending Approval'] || 0,
+      rejected: counts.Rejected || 0,
+    });
     return { total, tva, average, counts, excluded: receipts.length - converted.length };
-  }, [receipts, settings.defaultCurrency]);
+  }, [filters.month, receipts, settings.defaultCurrency]);
 
   const categoryData = useMemo(() => {
     const grouped = new Map<string, number>();
@@ -218,9 +272,16 @@ export default function App() {
       const res = await fetch('/api/receipts/process', { method: 'POST', body: formData });
       const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to process receipt.');
-      setReceipts(prev => [data.receipt, ...prev]);
-      setSelectedReceipt(data.receipt);
       setPage('dashboard');
+      setSelectedReceipt(data.receipt);
+      const receiptMonth = (data.receipt.receipt_date || data.receipt.date || '').slice(0, 7);
+      if (receiptMonth && receiptMonth !== filters.month) {
+        setFilters(prev => ({ ...prev, month: receiptMonth }));
+      } else if (!receiptMonth && filters.month) {
+        setFilters(prev => ({ ...prev, month: '' }));
+      } else {
+        await fetchReceipts();
+      }
     } catch (err: any) {
       setError(err.message || 'Upload failed.');
     } finally {
@@ -246,9 +307,8 @@ export default function App() {
       });
       const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to save receipt.');
-      setReceipts(prev => prev.map(receipt => (receipt.id === id ? data.receipt : receipt)));
-      setSelectedReceipt(data.receipt);
       setEditForm(null);
+      await fetchReceipts();
     } catch (err: any) {
       setError(err.message || 'Could not save changes.');
     } finally {
@@ -268,8 +328,7 @@ export default function App() {
       });
       const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to update status.');
-      setReceipts(prev => prev.map(receipt => (receipt.id === selectedReceipt.id ? data.receipt : receipt)));
-      setSelectedReceipt(data.receipt);
+      await fetchReceipts();
     } catch (err: any) {
       setError(err.message || 'Status update failed.');
     } finally {
@@ -287,9 +346,7 @@ export default function App() {
       const res = await fetch(`/api/receipts/${selectedReceipt.id}`, { method: 'DELETE' });
       const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to delete receipt.');
-      const remaining = receipts.filter(receipt => receipt.id !== selectedReceipt.id);
-      setReceipts(remaining);
-      setSelectedReceipt(remaining[0] || null);
+      await fetchReceipts();
     } catch (err: any) {
       setError(err.message || 'Delete failed.');
     } finally {
@@ -323,6 +380,32 @@ export default function App() {
     { page: 'analytics' as const, label: 'Analytics', icon: BarChart3 },
     { page: 'settings' as const, label: 'Settings', icon: Settings },
   ];
+
+  const currencySelectValue = currencyMode;
+
+  function selectCurrency(value: string) {
+    setCurrencyMode(value);
+    if (value === CUSTOM_CURRENCY) {
+      setCustomCurrency(dashboardCurrencies.includes(settings.defaultCurrency) ? '' : settings.defaultCurrency);
+      setCurrencyError('');
+      return;
+    }
+    setCurrencyError('');
+    setCustomCurrency('');
+    setSettings(prev => ({ ...prev, defaultCurrency: value }));
+  }
+
+  function applyCustomCurrency(value: string) {
+    const currency = value.replace(/[^a-z]/gi, '').slice(0, 3).toUpperCase();
+    setCustomCurrency(currency);
+    if (currency.length === 3) {
+      setCurrencyError('');
+      setCurrencyMode(CUSTOM_CURRENCY);
+      setSettings(prev => ({ ...prev, defaultCurrency: currency }));
+    } else {
+      setCurrencyError('Enter exactly 3 letters.');
+    }
+  }
 
   return (
     <div className="min-h-screen bg-[#080808] text-slate-100">
@@ -385,14 +468,25 @@ export default function App() {
               <label className="flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 text-sm text-slate-300">
                 <span className="hidden sm:inline">Currency</span>
                 <select
-                  value={settings.defaultCurrency}
-                  onChange={event => setSettings(prev => ({ ...prev, defaultCurrency: event.target.value }))}
+                  value={currencySelectValue}
+                  onChange={event => selectCurrency(event.target.value)}
                   className="bg-transparent font-semibold text-white outline-none"
                   aria-label="Dashboard currency"
                 >
                   {dashboardCurrencies.map(currency => <option key={currency} value={currency} className="bg-neutral-900">{currency}</option>)}
+                  <option value={CUSTOM_CURRENCY} className="bg-neutral-900">Other / Custom</option>
                 </select>
               </label>
+              {currencySelectValue === CUSTOM_CURRENCY && (
+                <input
+                  value={customCurrency}
+                  onChange={event => applyCustomCurrency(event.target.value)}
+                  placeholder="Enter currency code"
+                  maxLength={3}
+                  aria-label="Custom currency code"
+                  className="h-10 w-44 rounded-lg border border-white/10 bg-white/5 px-3 text-sm uppercase outline-none focus:border-orange-500"
+                />
+              )}
               <button
                 onClick={fetchReceipts}
                 disabled={loading}
@@ -420,6 +514,9 @@ export default function App() {
               <span>{error}</span>
             </div>
           )}
+          {currencyError && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">{currencyError}</div>
+          )}
           {totals.excluded > 0 && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
               {totals.excluded} receipt{totals.excluded === 1 ? '' : 's'} excluded from totals because conversion to {settings.defaultCurrency} is unavailable or pending.
@@ -429,10 +526,10 @@ export default function App() {
           {page === 'dashboard' && (
             <>
               <section className="grid grid-cols-1 gap-3 xl:grid-cols-[1.5fr_1fr_1fr_1fr]">
-                <Kpi title="Monthly Total" value={money(totals.total, settings.defaultCurrency)} icon={CircleDollarSign} />
-                <Kpi title={settings.vatLabel} value={money(totals.tva, settings.defaultCurrency)} icon={FileText} />
-                <Kpi title="Pending" value={String(totals.counts['Pending Approval'] || 0)} icon={SlidersHorizontal} />
-                <Kpi title="Approved" value={String(totals.counts.Approved || 0)} icon={Check} />
+                <Kpi title="Monthly Total" value={loading && !receipts.length ? 'Loading...' : money(totals.total, settings.defaultCurrency)} icon={CircleDollarSign} />
+                <Kpi title={settings.vatLabel} value={loading && !receipts.length ? 'Loading...' : money(totals.tva, settings.defaultCurrency)} icon={FileText} />
+                <Kpi title="Pending" value={loading && !receipts.length ? '...' : String(totals.counts['Pending Approval'] || 0)} icon={SlidersHorizontal} />
+                <Kpi title="Approved" value={loading && !receipts.length ? '...' : String(totals.counts.Approved || 0)} icon={Check} />
               </section>
 
               <FilterBar filters={filters} setFilters={setFilters} />
@@ -445,6 +542,7 @@ export default function App() {
                     selectedId={selectedReceipt?.id}
                     loading={loading}
                     currency={settings.defaultCurrency}
+                    month={filters.month}
                     onSelect={receipt => {
                       setSelectedReceipt(receipt);
                       setEditForm(null);
@@ -497,10 +595,10 @@ export default function App() {
           {page === 'analytics' && (
             <section className="space-y-6">
               <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-                <Kpi title="Total expenses" value={money(totals.total, settings.defaultCurrency)} icon={CircleDollarSign} />
-                <Kpi title="TVA total" value={money(totals.tva, settings.defaultCurrency)} icon={FileText} />
-                <Kpi title="Average receipt" value={money(totals.average, settings.defaultCurrency)} icon={PieChartIcon} />
-                <Kpi title="Receipts" value={String(receipts.length)} icon={FileText} />
+                <Kpi title="Total expenses" value={loading && !receipts.length ? 'Loading...' : money(totals.total, settings.defaultCurrency)} icon={CircleDollarSign} />
+                <Kpi title="TVA total" value={loading && !receipts.length ? 'Loading...' : money(totals.tva, settings.defaultCurrency)} icon={FileText} />
+                <Kpi title="Average receipt" value={loading && !receipts.length ? 'Loading...' : money(totals.average, settings.defaultCurrency)} icon={PieChartIcon} />
+                <Kpi title="Receipts" value={loading && !receipts.length ? '...' : String(receipts.length)} icon={FileText} />
               </div>
               <ChartCard title="Monthly Trend" empty={!monthlyTrend.length}>
                 <ResponsiveContainer width="100%" height={320}>
@@ -534,12 +632,23 @@ export default function App() {
                 <label className="grid gap-2 text-sm">
                   <span className="text-slate-400">Default currency</span>
                   <select
-                    value={settings.defaultCurrency}
-                    onChange={event => setSettings(prev => ({ ...prev, defaultCurrency: event.target.value }))}
+                    value={currencySelectValue}
+                    onChange={event => selectCurrency(event.target.value)}
                     className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 outline-none focus:border-orange-500"
                   >
                     {dashboardCurrencies.map(currency => <option key={currency}>{currency}</option>)}
+                    <option value={CUSTOM_CURRENCY}>Other / Custom</option>
                   </select>
+                  {currencySelectValue === CUSTOM_CURRENCY && (
+                    <input
+                      value={customCurrency}
+                      onChange={event => applyCustomCurrency(event.target.value)}
+                      placeholder="Enter currency code"
+                      maxLength={3}
+                      className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 uppercase outline-none focus:border-orange-500"
+                    />
+                  )}
+                  {currencyError && <span className="text-xs text-amber-300">{currencyError}</span>}
                 </label>
                 <label className="grid gap-2 text-sm">
                   <span className="text-slate-400">VAT label</span>
@@ -611,9 +720,12 @@ function Kpi({ title, value, icon: Icon }: { title: string; value: string; icon:
 function FilterBar({ filters, setFilters }: { filters: ReceiptFilters; setFilters: React.Dispatch<React.SetStateAction<ReceiptFilters>> }) {
   return (
     <section className="rounded-lg border border-white/10 bg-white/[0.04] p-4 backdrop-blur">
-      <div className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-300">
-        <Filter size={17} className="text-orange-400" />
-        Filters
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-medium text-slate-300">
+          <Filter size={17} className="text-orange-400" />
+          Receipt history
+        </div>
+        <p className="text-xs text-slate-500">{filters.month ? `Showing ${filters.month}` : 'Showing all months'}</p>
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
         <label className="relative xl:col-span-2">
@@ -625,12 +737,15 @@ function FilterBar({ filters, setFilters }: { filters: ReceiptFilters; setFilter
             className="h-10 w-full rounded-lg border border-white/10 bg-black/30 pl-9 pr-3 text-sm outline-none focus:border-orange-500"
           />
         </label>
-        <input
-          type="month"
-          value={filters.month}
-          onChange={event => setFilters(prev => ({ ...prev, month: event.target.value }))}
-          className="h-10 rounded-lg border border-white/10 bg-black/30 px-3 text-sm outline-none focus:border-orange-500"
-        />
+        <label className="grid gap-1 text-xs text-slate-500">
+          Month
+          <input
+            type="month"
+            value={filters.month}
+            onChange={event => setFilters(prev => ({ ...prev, month: event.target.value }))}
+            className="h-10 rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-slate-100 outline-none focus:border-orange-500"
+          />
+        </label>
         <select
           value={filters.category}
           onChange={event => setFilters(prev => ({ ...prev, category: event.target.value as ReceiptFilters['category'] }))}
@@ -647,12 +762,20 @@ function FilterBar({ filters, setFilters }: { filters: ReceiptFilters; setFilter
           <option>All</option>
           {statuses.map(status => <option key={status}>{status}</option>)}
         </select>
-        <button
-          onClick={() => setFilters({ month: getCurrentMonth(), category: 'All', status: 'All', search: '', from: '', to: '' })}
-          className="h-10 rounded-lg border border-white/10 bg-white/5 px-3 text-sm transition hover:bg-white/10"
-        >
-          Reset
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => setFilters(prev => ({ ...prev, month: '' }))}
+            className="h-10 rounded-lg border border-white/10 bg-white/5 px-3 text-sm transition hover:bg-white/10"
+          >
+            All history
+          </button>
+          <button
+            onClick={() => setFilters({ month: getCurrentMonth(), category: 'All', status: 'All', search: '', from: '', to: '' })}
+            className="h-10 rounded-lg border border-white/10 bg-white/5 px-3 text-sm transition hover:bg-white/10"
+          >
+            Reset
+          </button>
+        </div>
       </div>
       <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
         <input
@@ -693,15 +816,17 @@ function ReceiptTable({
   selectedId,
   loading,
   currency,
+  month,
   onSelect,
 }: {
   receipts: Receipt[];
   selectedId?: string;
   loading: boolean;
   currency: string;
+  month: string;
   onSelect: (receipt: Receipt) => void;
 }) {
-  if (loading) {
+  if (loading && !receipts.length) {
     return (
       <div className="flex min-h-72 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04]">
         <Loader2 className="animate-spin text-orange-400" />
@@ -713,14 +838,22 @@ function ReceiptTable({
     return (
       <div className="flex min-h-72 flex-col items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] p-8 text-center">
         <FileText size={34} className="text-slate-500" />
-        <p className="mt-3 text-lg font-semibold">No receipts found</p>
-        <p className="mt-1 max-w-md text-sm text-slate-500">Upload a receipt or adjust filters to populate the dashboard with real Supabase data.</p>
+        <p className="mt-3 text-lg font-semibold">No receipts found{month ? ` for ${month}` : ''}</p>
+        <p className="mt-1 max-w-md text-sm text-slate-500">
+          {month ? 'Choose another month or select All history. Existing receipts remain stored in Supabase.' : 'Upload a receipt or adjust the history filters.'}
+        </p>
       </div>
     );
   }
 
   return (
     <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.04]">
+      {loading && (
+        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2 text-xs text-slate-400">
+          <Loader2 size={13} className="animate-spin" />
+          Refreshing Supabase history...
+        </div>
+      )}
       <div className="grid grid-cols-[1.2fr_0.8fr_0.7fr_0.7fr_32px] gap-3 border-b border-white/10 px-4 py-3 text-xs uppercase tracking-wide text-slate-500">
         <span>Merchant</span>
         <span>Category</span>
