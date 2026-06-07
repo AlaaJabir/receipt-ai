@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import multer from 'multer';
 import { createClient } from '@supabase/supabase-js';
-import { GoogleGenAI } from '@google/genai';
+import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
 dotenv.config({ path: '.env.local' });
@@ -42,14 +42,14 @@ function getSupabase() {
   return supabase;
 }
 
-let ai: GoogleGenAI | null = null;
+let ai: OpenAI | null = null;
 function getAI() {
   if (!ai) {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY must be defined in the environment.');
+      throw new Error('OPENAI_API_KEY must be defined in the environment.');
     }
-    ai = new GoogleGenAI({ apiKey });
+    ai = new OpenAI({ apiKey });
   }
   return ai;
 }
@@ -155,7 +155,7 @@ app.get('/api/health', async (_req, res) => {
   const env = {
     supabaseUrl: Boolean(process.env.SUPABASE_URL),
     supabaseServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
-    geminiApiKey: Boolean(process.env.GEMINI_API_KEY),
+    openaiApiKey: Boolean(process.env.OPENAI_API_KEY),
   };
 
   let supabaseStatus = 'not_configured';
@@ -219,50 +219,69 @@ app.post('/api/receipts/process', upload.single('receipt'), async (req, res) => 
       return res.status(400).json({ error: 'Invalid file type. Upload a JPG, PNG, or PDF receipt.' });
     }
 
-    const aiResponse = await getAI().models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [
+    const base64File = file.buffer.toString('base64');
+    const fileInput = file.mimetype === 'application/pdf'
+      ? {
+          type: 'input_file' as const,
+          filename: file.originalname,
+          file_data: `data:application/pdf;base64,${base64File}`,
+        }
+      : {
+          type: 'input_image' as const,
+          image_url: `data:${file.mimetype};base64,${base64File}`,
+          detail: 'high' as const,
+        };
+
+    const aiResponse = await getAI().responses.create({
+      model: 'gpt-5-mini',
+      input: [
         {
           role: 'user',
-          parts: [
+          content: [
             {
+              type: 'input_text',
               text: `You are ReceiptAI, a precise finance data extractor for Moroccan business receipts.
-Return ONLY one valid JSON object. Do not use markdown, comments, or extra text.
 Use null for missing fields. Numeric fields must be numbers, not strings.
 Normalize DH, DHS, and dirham to MAD when possible.
 The category must be exactly one of: Meals, Transport, Software, Office, Fuel, Travel, Utilities, Other.
-
-Extract this schema:
-{
-  "merchant": string | null,
-  "transaction_ref": string | null,
-  "date": string | null,
-  "category": "Meals" | "Transport" | "Software" | "Office" | "Fuel" | "Travel" | "Utilities" | "Other",
-  "total": number | null,
-  "currency": string | null,
-  "ht": number | null,
-  "tva": number | null,
-  "insight": string | null,
-  "status": "Pending Approval"
-}`,
+The status must be Pending Approval.`,
             },
-            {
-              inlineData: {
-                data: file.buffer.toString('base64'),
-                mimeType: file.mimetype,
-              },
-            },
+            fileInput,
           ],
         },
       ],
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'receipt',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              merchant: { type: ['string', 'null'] },
+              transaction_ref: { type: ['string', 'null'] },
+              date: { type: ['string', 'null'] },
+              category: { type: 'string', enum: CATEGORIES },
+              total: { type: ['number', 'null'] },
+              currency: { type: ['string', 'null'] },
+              ht: { type: ['number', 'null'] },
+              tva: { type: ['number', 'null'] },
+              insight: { type: ['string', 'null'] },
+              status: { type: 'string', enum: ['Pending Approval'] },
+            },
+            required: ['merchant', 'transaction_ref', 'date', 'category', 'total', 'currency', 'ht', 'tva', 'insight', 'status'],
+          },
+        },
+      },
     });
 
-    const aiText = aiResponse.text || '';
+    const aiText = aiResponse.output_text || '';
     let parsed: Record<string, unknown>;
     try {
-      parsed = JSON.parse(aiText.replace(/```json/g, '').replace(/```/g, '').trim());
+      parsed = JSON.parse(aiText);
     } catch {
-      return res.status(502).json({ error: 'Gemini returned invalid JSON.', rawText: aiText });
+      return res.status(502).json({ error: 'OpenAI returned invalid JSON.', rawText: aiText });
     }
 
     const receiptPayload = normalizeReceipt({ ...parsed, status: 'Pending Approval' }, file);

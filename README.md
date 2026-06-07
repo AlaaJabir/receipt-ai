@@ -1,8 +1,8 @@
 # ReceiptAI
 
-ReceiptAI is a production-ready AI receipt and expense dashboard built with React, Vite, TypeScript, Tailwind CSS, Express, Supabase, Gemini 2.5 Flash, Recharts, lucide-react, multer, and jsPDF.
+ReceiptAI is a production-ready AI receipt and expense dashboard built with React, Vite, TypeScript, Tailwind CSS, Express, Supabase, OpenAI, Recharts, lucide-react, multer, and jsPDF.
 
-Users can upload JPG, PNG, or PDF receipts. The backend validates the file, sends it to Gemini, normalizes the extracted JSON, stores it in Supabase, and returns live dashboard data with filters, approval workflow, editing, deleting, analytics, settings, and PDF export.
+Users can upload JPG, PNG, or PDF receipts. The backend validates the file, sends it to OpenAI, normalizes the extracted JSON, stores it in Supabase, and returns live dashboard data with filters, approval workflow, editing, deleting, analytics, settings, and PDF export.
 
 ## Setup
 
@@ -19,7 +19,7 @@ VITE_SUPABASE_URL=
 VITE_SUPABASE_ANON_KEY=
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
-GEMINI_API_KEY=
+OPENAI_API_KEY=
 ```
 
 3. Run the Supabase migration:
