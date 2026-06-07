@@ -44,6 +44,7 @@ import type {
 
 const categories: ReceiptCategory[] = ['Meals', 'Transport', 'Software', 'Office', 'Fuel', 'Travel', 'Utilities', 'Other'];
 const statuses: ReceiptStatus[] = ['Pending Approval', 'Approved', 'Rejected'];
+const dashboardCurrencies = ['MAD', 'EUR', 'USD', 'CHF', 'GBP', 'CAD', 'AED'];
 const chartColors = ['#F97316', '#14B8A6', '#60A5FA', '#A78BFA', '#FACC15', '#FB7185', '#34D399', '#94A3B8'];
 const defaultSettings: DashboardSettings = { defaultCurrency: 'MAD', vatLabel: 'TVA récupérable', compactMode: false };
 
@@ -122,6 +123,8 @@ export default function App() {
   const [error, setError] = useState('');
   const [health, setHealth] = useState('checking');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const receiptRequestRef = useRef(0);
+
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
     Object.entries(filters).forEach(([key, value]: [string, string]) => {
@@ -132,12 +135,14 @@ export default function App() {
   }, [filters, settings.defaultCurrency]);
 
   const fetchReceipts = useCallback(async () => {
+    const requestId = ++receiptRequestRef.current;
     setLoading(true);
     setError('');
     try {
       const res = await fetch(`/api/receipts?${queryString}`);
       const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Failed to load receipts.');
+      if (requestId !== receiptRequestRef.current) return;
       setReceipts(data.receipts || []);
       setSelectedReceipt(current => {
         if (current && data.receipts?.some((receipt: Receipt) => receipt.id === current.id)) {
@@ -146,9 +151,10 @@ export default function App() {
         return data.receipts?.[0] || null;
       });
     } catch (err: any) {
+      if (requestId !== receiptRequestRef.current) return;
       setError(err.message || 'Network error while loading receipts.');
     } finally {
-      setLoading(false);
+      if (requestId === receiptRequestRef.current) setLoading(false);
     }
   }, [queryString]);
 
@@ -376,6 +382,17 @@ export default function App() {
               </h2>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <label className="flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 text-sm text-slate-300">
+                <span className="hidden sm:inline">Currency</span>
+                <select
+                  value={settings.defaultCurrency}
+                  onChange={event => setSettings(prev => ({ ...prev, defaultCurrency: event.target.value }))}
+                  className="bg-transparent font-semibold text-white outline-none"
+                  aria-label="Dashboard currency"
+                >
+                  {dashboardCurrencies.map(currency => <option key={currency} value={currency} className="bg-neutral-900">{currency}</option>)}
+                </select>
+              </label>
               <button
                 onClick={fetchReceipts}
                 disabled={loading}
@@ -447,6 +464,7 @@ export default function App() {
                   onSave={() => selectedReceipt && editForm && updateReceipt(selectedReceipt.id, editForm)}
                   setForm={setEditForm}
                   saving={saving}
+                  displayCurrency={settings.defaultCurrency}
                 />
               </section>
 
@@ -515,11 +533,13 @@ export default function App() {
               <div className="mt-6 grid gap-5">
                 <label className="grid gap-2 text-sm">
                   <span className="text-slate-400">Default currency</span>
-                  <input
+                  <select
                     value={settings.defaultCurrency}
-                    onChange={event => setSettings(prev => ({ ...prev, defaultCurrency: event.target.value.toUpperCase() || 'MAD' }))}
+                    onChange={event => setSettings(prev => ({ ...prev, defaultCurrency: event.target.value }))}
                     className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 outline-none focus:border-orange-500"
-                  />
+                  >
+                    {dashboardCurrencies.map(currency => <option key={currency}>{currency}</option>)}
+                  </select>
                 </label>
                 <label className="grid gap-2 text-sm">
                   <span className="text-slate-400">VAT label</span>
@@ -723,9 +743,9 @@ function ReceiptTable({
           <span className="truncate text-slate-300">{receipt.category}</span>
           <StatusPill status={receipt.status} />
           <span className="text-right">
-            <span className="block font-semibold">{money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</span>
+            <span className="block font-semibold">Original: {money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</span>
             {receipt.converted_total !== null && receipt.display_currency === currency ? (
-              <span className="block text-xs text-emerald-300">{money(receipt.converted_total, receipt.display_currency)}</span>
+              <span className="block text-xs text-emerald-300">Converted: {money(receipt.converted_total, receipt.display_currency)}</span>
             ) : (
               <span className="block text-xs text-amber-300">Conversion unavailable</span>
             )}
@@ -749,6 +769,7 @@ function DetailsPanel({
   onSave,
   setForm,
   saving,
+  displayCurrency,
 }: {
   receipt: Receipt | null;
   editForm: ReceiptFormState | null;
@@ -761,6 +782,7 @@ function DetailsPanel({
   onSave: () => void;
   setForm: React.Dispatch<React.SetStateAction<ReceiptFormState | null>>;
   saving: boolean;
+  displayCurrency: string;
 }) {
   if (!receipt) {
     return (
@@ -821,6 +843,18 @@ function DetailsPanel({
             <Detail label="Montant HT" value={money(receipt.original_ht ?? receipt.ht, receipt.original_currency || receipt.currency || 'MAD')} />
             <Detail label="TVA" value={money(receipt.original_tva ?? receipt.tva, receipt.original_currency || receipt.currency || 'MAD')} />
             <Detail
+              label="Converted HT"
+              value={receipt.display_currency !== displayCurrency
+                ? `Updating to ${displayCurrency}...`
+                : receipt.converted_ht === null ? 'Unavailable' : money(receipt.converted_ht, receipt.display_currency)}
+            />
+            <Detail
+              label="Converted TVA"
+              value={receipt.display_currency !== displayCurrency
+                ? `Updating to ${displayCurrency}...`
+                : receipt.converted_tva === null ? 'Unavailable' : money(receipt.converted_tva, receipt.display_currency)}
+            />
+            <Detail
               label="Exchange rate"
               value={receipt.exchange_rate
                 ? `${receipt.exchange_rate} (${receipt.exchange_rate_source}, ${receipt.exchange_rate_date || 'no date'})`
@@ -830,10 +864,14 @@ function DetailsPanel({
           <div className="mt-5 rounded-lg border border-orange-500/20 bg-orange-500/10 p-4">
             <p className="text-xs uppercase tracking-wide text-orange-300">Original total</p>
             <p className="mt-1 text-3xl font-bold">{money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</p>
-            {receipt.converted_total !== null ? (
+            {receipt.converted_total !== null && receipt.display_currency === displayCurrency ? (
               <p className="mt-2 text-sm text-emerald-300">Converted: {money(receipt.converted_total, receipt.display_currency || 'MAD')}</p>
             ) : (
-              <p className="mt-2 text-sm text-amber-300">{receipt.conversion_warning || 'Conversion unavailable. This receipt is excluded from dashboard totals.'}</p>
+              <p className="mt-2 text-sm text-amber-300">
+                {receipt.display_currency !== displayCurrency
+                  ? `Updating conversion to ${displayCurrency}...`
+                  : receipt.conversion_warning || 'Conversion unavailable. This receipt is excluded from dashboard totals.'}
+              </p>
             )}
           </div>
           {receipt.insight && (

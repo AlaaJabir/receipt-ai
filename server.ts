@@ -17,6 +17,14 @@ const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf'
 const CATEGORIES = ['Meals', 'Transport', 'Software', 'Office', 'Fuel', 'Travel', 'Utilities', 'Other'];
 const STATUSES = ['Pending Approval', 'Approved', 'Rejected'];
 const EXCHANGE_RATE_API_URL = 'https://api.frankfurter.dev/v2/rate';
+const LATEST_RATE_CACHE_MS = 60 * 60 * 1000;
+
+type CachedRate = {
+  expiresAt: number;
+  promise: Promise<{ rate: number; date: string }>;
+};
+
+const exchangeRateCache = new Map<string, CachedRate>();
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -132,15 +140,33 @@ function roundMoney(value: number | null, rate: number): number | null {
 }
 
 async function requestExchangeRate(base: string, quote: string, date?: string) {
+  const cacheKey = `${base}:${quote}:${date || 'latest'}`;
+  const cached = exchangeRateCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
   const url = new URL(`${EXCHANGE_RATE_API_URL}/${encodeURIComponent(base)}/${encodeURIComponent(quote)}`);
   if (date) url.searchParams.set('date', date);
 
-  const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  if (!response.ok) throw new Error(`Exchange-rate API returned ${response.status}.`);
+  const promise = (async () => {
+    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(`Exchange-rate API returned ${response.status}.`);
 
-  const data = await response.json() as { rate?: number; date?: string };
-  if (!Number.isFinite(data.rate) || !data.date) throw new Error('Exchange-rate API returned an invalid rate.');
-  return { rate: Number(data.rate), date: data.date };
+    const data = await response.json() as { rate?: number; date?: string };
+    if (!Number.isFinite(data.rate) || !data.date) throw new Error('Exchange-rate API returned an invalid rate.');
+    return { rate: Number(data.rate), date: data.date };
+  })();
+
+  exchangeRateCache.set(cacheKey, {
+    promise,
+    expiresAt: date ? Number.MAX_SAFE_INTEGER : Date.now() + LATEST_RATE_CACHE_MS,
+  });
+
+  try {
+    return await promise;
+  } catch (error) {
+    exchangeRateCache.delete(cacheKey);
+    throw error;
+  }
 }
 
 async function convertReceiptValues(
