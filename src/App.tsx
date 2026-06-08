@@ -226,8 +226,8 @@ export default function App() {
   useEffect(() => {
     fetch('/api/health')
       .then(readApiResponse)
-      .then(data => setHealth(data.supabase === 'ok' ? 'connected' : data.supabase || 'error'))
-      .catch(() => setHealth('offline'));
+      .then(data => setHealth(data.supabase === 'ok' ? 'operational' : 'unavailable'))
+      .catch(() => setHealth('unavailable'));
   }, []);
 
   const totals = useMemo(() => {
@@ -542,7 +542,7 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-xl font-bold">Receipt<span className="text-orange-500">AI</span></h1>
-            <p className="text-xs text-slate-500">AI expense operations</p>
+            <p className="text-xs text-slate-500">Smart expense operations</p>
           </div>
         </div>
 
@@ -574,8 +574,10 @@ export default function App() {
         </button>
 
         <div className="absolute bottom-5 left-5 right-5 rounded-lg border border-white/10 bg-white/[0.04] p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Supabase</p>
-          <p className={`mt-1 text-sm font-medium ${health === 'connected' ? 'text-emerald-400' : 'text-amber-300'}`}>{health}</p>
+          <p className="text-xs uppercase tracking-wide text-slate-500">System status</p>
+          <p className={`mt-1 text-sm font-medium ${health === 'operational' ? 'text-emerald-400' : 'text-amber-300'}`}>
+            {health === 'operational' ? 'Operational' : health === 'checking' ? 'Checking...' : 'Unavailable'}
+          </p>
         </div>
       </aside>
 
@@ -861,7 +863,7 @@ export default function App() {
                   </select>
                   <span className="text-xs text-slate-500">
                     {settings.conversionRateMode === 'latest'
-                      ? 'Uses the latest published API rate and ignores receipt dates.'
+                      ? 'Uses the latest published rate and ignores receipt dates.'
                       : 'Uses each receipt date. Receipts without an available dated rate are excluded.'}
                   </span>
                 </label>
@@ -1044,7 +1046,7 @@ function UploadZone({ uploading, onPick }: { uploading: boolean; onPick: () => v
         {uploading ? <Loader2 className="animate-spin" size={26} /> : <Upload size={26} />}
       </div>
       <p className="mt-3 text-base font-semibold sm:mt-4 sm:text-lg">{uploading ? 'Extracting receipt data...' : 'Upload JPG, PNG, or PDF receipt'}</p>
-      <p className="mt-1 text-sm text-slate-500">OpenAI extracts the printed values, then ReceiptAI converts them using dated exchange rates.</p>
+      <p className="mt-1 text-sm text-slate-500">ReceiptAI securely extracts printed values and converts them using dated exchange rates.</p>
     </button>
   );
 }
@@ -1088,7 +1090,7 @@ function ReceiptTable({
         <FileText size={34} className="text-slate-500" />
         <p className="mt-3 text-lg font-semibold">No receipts found{month ? ` for ${month}` : ''}</p>
         <p className="mt-1 max-w-md text-sm text-slate-500">
-          {month ? 'Choose another month or select All history. Existing receipts remain stored in Supabase.' : 'Upload a receipt or adjust the history filters.'}
+          {month ? 'Choose another month or select All history. Existing receipts remain stored securely.' : 'Upload a receipt or adjust the history filters.'}
         </p>
       </div>
     );
@@ -1099,13 +1101,13 @@ function ReceiptTable({
 
   return (
     <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.04]">
-      <div className="flex flex-col gap-3 border-b border-white/10 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-4">
-        <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-300">
+      <div className="flex flex-col gap-3 border-b border-white/10 bg-black/20 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-4">
+        <label className="flex h-10 cursor-pointer items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 text-xs font-semibold text-slate-200">
           <input
             type="checkbox"
             checked={allVisibleSelected}
             onChange={onSelectAllVisible}
-            className="h-4 w-4 rounded border-white/20 bg-black/40 accent-orange-500"
+            className="h-5 w-5 rounded border-white/20 bg-black/40 accent-orange-500"
           />
           Select all visible
         </label>
@@ -1126,52 +1128,59 @@ function ReceiptTable({
       {loading && (
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2 text-xs text-slate-400">
           <Loader2 size={13} className="animate-spin" />
-          Refreshing Supabase history...
+          Refreshing history...
         </div>
       )}
-      <div className="hidden grid-cols-[32px_1.2fr_0.8fr_0.7fr_0.7fr_32px] gap-3 border-b border-white/10 px-4 py-3 text-xs uppercase tracking-wide text-slate-500 sm:grid">
-        <span />
+      <div className="hidden grid-cols-[88px_1.2fr_0.8fr_0.7fr_0.7fr_32px] gap-3 border-b border-white/10 px-4 py-3 text-xs uppercase tracking-wide text-slate-500 sm:grid">
+        <span>Select</span>
         <span>Merchant</span>
         <span>Category</span>
         <span>Status</span>
         <span className="text-right">Total</span>
         <span />
       </div>
-      {receipts.map(receipt => (
-        <div
-          key={receipt.id}
-          className={`grid w-full grid-cols-[28px_1fr_auto] items-start gap-x-3 gap-y-3 border-b border-white/5 px-3 py-3.5 text-left text-sm transition last:border-0 sm:grid-cols-[32px_1.2fr_0.8fr_0.7fr_0.7fr_32px] sm:items-center sm:gap-3 sm:px-4 sm:py-4 ${
-            selectedId === receipt.id ? 'bg-orange-500/10' : 'hover:bg-white/[0.06]'
-          }`}
-        >
-          <label className="col-start-1 row-span-3 flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-black/20 sm:row-auto">
-            <input
-              type="checkbox"
-              checked={selectedReceiptIds.has(receipt.id)}
-              onChange={() => onToggleSelected(receipt.id)}
-              className="h-4 w-4 accent-orange-500"
-              aria-label={`Select ${receipt.merchant || 'receipt'}`}
-            />
-          </label>
-          <button type="button" onClick={() => onSelect(receipt)} className="col-start-2 min-w-0 text-left">
-            <span className="block truncate font-medium">{receipt.merchant || 'Unknown merchant'}</span>
-            <span className="block truncate text-xs text-slate-500">{receipt.date || receipt.created_at?.slice(0, 10)} • {receipt.transaction_ref || receipt.id.slice(0, 8)}</span>
-          </button>
-          <button type="button" onClick={() => onSelect(receipt)} className="col-start-2 row-start-2 truncate text-left text-xs text-slate-400 sm:col-auto sm:row-auto sm:text-sm sm:text-slate-300">{receipt.category}</button>
-          <button type="button" onClick={() => onSelect(receipt)} className="col-start-3 row-start-1 justify-self-end sm:col-auto sm:row-auto sm:justify-self-auto"><StatusPill status={receipt.status} /></button>
-          <button type="button" onClick={() => onSelect(receipt)} className="col-span-2 col-start-2 row-start-3 text-left sm:col-auto sm:row-auto sm:text-right">
-            <span className="block font-semibold">Original: {money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</span>
-            {receipt.converted_total !== null && receipt.display_currency === currency ? (
-              <span className="block text-xs text-emerald-300">Converted: {money(receipt.converted_total, receipt.display_currency)}</span>
-            ) : (
-              <span className="block text-xs text-amber-300">Conversion unavailable</span>
-            )}
-          </button>
-          <button type="button" onClick={() => onSelect(receipt)} className="hidden text-slate-500 sm:block">
-            <ChevronRight size={17} />
-          </button>
-        </div>
-      ))}
+      {receipts.map(receipt => {
+        const isChecked = selectedReceiptIds.has(receipt.id);
+        return (
+          <div
+            key={receipt.id}
+            className={`grid w-full grid-cols-[92px_1fr_auto] items-start gap-x-3 gap-y-3 border-b border-white/5 px-3 py-3.5 text-left text-sm transition last:border-0 sm:grid-cols-[88px_1.2fr_0.8fr_0.7fr_0.7fr_32px] sm:items-center sm:gap-3 sm:px-4 sm:py-4 ${
+              isChecked ? 'bg-orange-500/15' : selectedId === receipt.id ? 'bg-orange-500/10' : 'hover:bg-white/[0.06]'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => onToggleSelected(receipt.id)}
+              aria-pressed={isChecked}
+              className={`col-start-1 row-span-3 flex h-10 items-center justify-center rounded-lg border px-2 text-[11px] font-bold transition sm:row-auto ${
+                isChecked
+                  ? 'border-orange-500 bg-orange-500 text-black'
+                  : 'border-white/15 bg-white/5 text-slate-300 hover:border-orange-500/70 hover:text-orange-300'
+              }`}
+              aria-label={`${isChecked ? 'Unselect' : 'Select'} ${receipt.merchant || 'receipt'}`}
+            >
+              {isChecked ? 'Selected' : 'Select'}
+            </button>
+            <button type="button" onClick={() => onSelect(receipt)} className="col-start-2 min-w-0 text-left">
+              <span className="block truncate font-medium">{receipt.merchant || 'Unknown merchant'}</span>
+              <span className="block truncate text-xs text-slate-500">{receipt.date || receipt.created_at?.slice(0, 10)} • {receipt.transaction_ref || receipt.id.slice(0, 8)}</span>
+            </button>
+            <button type="button" onClick={() => onSelect(receipt)} className="col-start-2 row-start-2 truncate text-left text-xs text-slate-400 sm:col-auto sm:row-auto sm:text-sm sm:text-slate-300">{receipt.category}</button>
+            <button type="button" onClick={() => onSelect(receipt)} className="col-start-3 row-start-1 justify-self-end sm:col-auto sm:row-auto sm:justify-self-auto"><StatusPill status={receipt.status} /></button>
+            <button type="button" onClick={() => onSelect(receipt)} className="col-span-2 col-start-2 row-start-3 text-left sm:col-auto sm:row-auto sm:text-right">
+              <span className="block font-semibold">Original: {money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</span>
+              {receipt.converted_total !== null && receipt.display_currency === currency ? (
+                <span className="block text-xs text-emerald-300">Converted: {money(receipt.converted_total, receipt.display_currency)}</span>
+              ) : (
+                <span className="block text-xs text-amber-300">Conversion unavailable</span>
+              )}
+            </button>
+            <button type="button" onClick={() => onSelect(receipt)} className="hidden text-slate-500 sm:block">
+              <ChevronRight size={17} />
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
