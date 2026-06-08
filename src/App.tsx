@@ -546,21 +546,26 @@ export default function App() {
       </aside>
 
       <div className="lg:pl-72">
-        <header className="sticky top-0 z-10 border-b border-white/10 bg-[#080808]/80 px-4 py-4 backdrop-blur-xl md:px-8">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div>
-              <p className="text-xs uppercase tracking-[0.28em] text-orange-400">Moroccan finance dashboard</p>
-              <h2 className="mt-1 text-2xl font-semibold md:text-3xl">
-                {page === 'dashboard' ? 'Receipt control center' : page === 'analytics' ? 'Expense analytics' : 'Workspace settings'}
-              </h2>
+        <header className="sticky top-0 z-10 border-b border-white/10 bg-[#080808]/90 px-3 py-3 backdrop-blur-xl sm:px-4 md:px-8 md:py-4">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-orange-500 text-black lg:hidden">
+                <FileText size={19} />
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-[10px] uppercase tracking-[0.2em] text-orange-400 sm:text-xs sm:tracking-[0.24em]">Global expense management</p>
+                <h2 className="mt-0.5 truncate text-xl font-semibold sm:text-2xl md:text-3xl">
+                  {page === 'dashboard' ? 'Receipt control center' : page === 'analytics' ? 'Expense analytics' : 'Workspace settings'}
+                </h2>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <label className="flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 text-sm text-slate-300">
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+              <label className="flex h-9 min-w-0 items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/5 px-3 text-xs text-slate-300 sm:h-10 sm:justify-start sm:text-sm">
                 <span className="hidden sm:inline">Currency</span>
                 <select
                   value={currencySelectValue}
                   onChange={event => selectCurrency(event.target.value)}
-                  className="bg-transparent font-semibold text-white outline-none"
+                  className="min-w-0 bg-transparent font-semibold text-white outline-none"
                   aria-label="Dashboard currency"
                 >
                   {dashboardCurrencies.map(currency => <option key={currency} value={currency} className="bg-neutral-900">{currency}</option>)}
@@ -574,16 +579,16 @@ export default function App() {
                   placeholder="Enter currency code"
                   maxLength={3}
                   aria-label="Custom currency code"
-                  className="h-10 w-44 rounded-lg border border-white/10 bg-white/5 px-3 text-sm uppercase outline-none focus:border-orange-500"
+                  className="col-span-2 h-9 w-full rounded-lg border border-white/10 bg-white/5 px-3 text-xs uppercase outline-none focus:border-orange-500 sm:h-10 sm:w-44 sm:text-sm"
                 />
               )}
-              <span className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-400">
+              <span className="flex h-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 px-2 text-center text-[11px] text-slate-400 sm:h-10 sm:px-3 sm:text-xs">
                 {settings.conversionRateMode === 'latest' ? 'Latest rates' : 'Historical rates'}
               </span>
               <button
                 onClick={fetchReceipts}
                 disabled={loading}
-                className="flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 text-sm text-slate-200 transition hover:bg-white/10 disabled:opacity-60"
+                className="hidden h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 text-sm text-slate-200 transition hover:bg-white/10 disabled:opacity-60 sm:flex"
               >
                 <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
                 Refresh
@@ -591,7 +596,7 @@ export default function App() {
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploading}
-                className="flex h-10 items-center gap-2 rounded-lg bg-orange-500 px-4 text-sm font-bold text-black transition hover:bg-orange-400 disabled:opacity-60"
+                className="hidden h-10 items-center gap-2 rounded-lg bg-orange-500 px-4 text-sm font-bold text-black transition hover:bg-orange-400 disabled:opacity-60 sm:flex"
               >
                 {uploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
                 Upload
@@ -600,7 +605,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className={`px-4 py-6 md:px-8 ${settings.compactMode ? 'space-y-4' : 'space-y-6'}`}>
+        <main className={`px-3 py-4 pb-28 sm:px-4 sm:py-6 md:px-8 lg:pb-6 ${settings.compactMode ? 'space-y-4' : 'space-y-5 md:space-y-6'}`}>
           {error && (
             <div className="flex items-start gap-3 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
               <X size={18} className="mt-0.5 shrink-0" />
@@ -621,7 +626,7 @@ export default function App() {
 
           {page === 'dashboard' && (
             <>
-              <section className="grid grid-cols-1 gap-3 xl:grid-cols-[1.5fr_1fr_1fr_1fr]">
+              <section className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-[1.5fr_1fr_1fr_1fr]">
                 <Kpi title="Monthly Total" value={loading && !receipts.length ? 'Loading...' : money(totals.total, settings.defaultCurrency)} icon={CircleDollarSign} />
                 <Kpi title={settings.vatLabel} value={loading && !receipts.length ? 'Loading...' : money(totals.tva, settings.defaultCurrency)} icon={FileText} />
                 <Kpi title="Pending" value={loading && !receipts.length ? '...' : String(totals.counts['Pending Approval'] || 0)} icon={SlidersHorizontal} />
@@ -697,7 +702,7 @@ export default function App() {
 
           {page === 'analytics' && (
             <section className="space-y-6">
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2.5 sm:gap-3 md:grid-cols-4">
                 <Kpi title="Total expenses" value={loading && !receipts.length ? 'Loading...' : money(totals.total, settings.defaultCurrency)} icon={CircleDollarSign} />
                 <Kpi title="TVA total" value={loading && !receipts.length ? 'Loading...' : money(totals.tva, settings.defaultCurrency)} icon={FileText} />
                 <Kpi title="Average receipt" value={loading && !receipts.length ? 'Loading...' : money(totals.average, settings.defaultCurrency)} icon={PieChartIcon} />
@@ -729,7 +734,7 @@ export default function App() {
           )}
 
           {page === 'settings' && (
-            <section className="max-w-3xl rounded-lg border border-white/10 bg-white/[0.05] p-6 shadow-2xl shadow-black/20 backdrop-blur">
+            <section className="max-w-3xl rounded-lg border border-white/10 bg-white/[0.05] p-4 shadow-2xl shadow-black/20 backdrop-blur sm:p-6">
               <h3 className="text-lg font-semibold">Dashboard preferences</h3>
               <div className="mt-6 grid gap-5">
                 <div className="grid gap-4 rounded-lg border border-white/10 bg-black/20 p-4 md:grid-cols-2">
@@ -823,23 +828,32 @@ export default function App() {
         </main>
       </div>
 
-      <footer className="fixed bottom-0 left-0 right-0 z-30 border-t border-white/10 bg-black/80 px-4 py-3 backdrop-blur-xl lg:hidden">
-        <div className="mx-auto flex max-w-md items-center justify-between">
-          {navItems.slice(0, 2).map(item => {
+      <footer className="fixed bottom-0 left-0 right-0 z-30 border-t border-white/10 bg-[#0c0c0c]/95 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl lg:hidden">
+        <nav className="mx-auto grid max-w-md grid-cols-4 gap-1">
+          {navItems.map(item => {
             const Icon = item.icon;
             return (
-              <button key={item.page} onClick={() => setPage(item.page)} className={`rounded-lg p-3 ${page === item.page ? 'bg-orange-500 text-black' : 'text-slate-400'}`}>
-                <Icon size={21} />
+              <button
+                key={item.page}
+                onClick={() => setPage(item.page)}
+                className={`flex min-h-14 flex-col items-center justify-center gap-1 rounded-lg px-1 text-[10px] font-medium transition ${
+                  page === item.page ? 'bg-orange-500/15 text-orange-400' : 'text-slate-500'
+                }`}
+              >
+                <Icon size={19} />
+                <span>{item.label}</span>
               </button>
             );
           })}
-          <button onClick={() => fileInputRef.current?.click()} className="rounded-full bg-orange-500 p-4 text-black shadow-lg shadow-orange-500/30">
-            <Upload size={22} />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="flex min-h-14 flex-col items-center justify-center gap-1 rounded-lg bg-orange-500 text-[10px] font-bold text-black shadow-lg shadow-orange-500/20 disabled:opacity-60"
+          >
+            {uploading ? <Loader2 size={19} className="animate-spin" /> : <Upload size={19} />}
+            <span>Upload</span>
           </button>
-          <button onClick={() => setPage('settings')} className={`rounded-lg p-3 ${page === 'settings' ? 'bg-orange-500 text-black' : 'text-slate-400'}`}>
-            <Settings size={21} />
-          </button>
-        </div>
+        </nav>
       </footer>
     </div>
   );
@@ -854,12 +868,12 @@ const tooltipStyle = {
 
 function Kpi({ title, value, icon: Icon }: { title: string; value: string; icon: React.ElementType }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.05] p-5 shadow-2xl shadow-black/20 backdrop-blur">
+    <div className="min-w-0 rounded-lg border border-white/10 bg-white/[0.05] p-3.5 shadow-2xl shadow-black/20 backdrop-blur sm:p-5">
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs uppercase tracking-wide text-slate-500">{title}</p>
         <Icon size={18} className="text-orange-400" />
       </div>
-      <p className="mt-3 break-words text-2xl font-semibold text-white">{value}</p>
+      <p className="mt-2 break-words text-lg font-semibold leading-tight text-white sm:mt-3 sm:text-2xl">{value}</p>
     </div>
   );
 }
@@ -878,18 +892,18 @@ function FilterBar({
   receiptCount: number;
 }) {
   return (
-    <section className="rounded-lg border border-white/10 bg-white/[0.04] p-4 backdrop-blur">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+    <section className="rounded-lg border border-white/10 bg-white/[0.04] p-3 backdrop-blur sm:p-4">
+      <div className="mb-3 flex flex-col items-stretch justify-between gap-3 sm:flex-row sm:items-center">
         <div className="flex items-center gap-2 text-sm font-medium text-slate-300">
           <Filter size={17} className="text-orange-400" />
           Receipt history
         </div>
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center justify-between gap-2 sm:justify-start sm:gap-3">
           <p className="text-xs text-slate-500">{filters.month ? `Showing ${filters.month}` : 'Showing all months'}</p>
           <button
             onClick={onExport}
             disabled={exporting || receiptCount === 0}
-            className="flex h-9 items-center gap-2 rounded-lg border border-orange-500/30 bg-orange-500/10 px-3 text-xs font-semibold text-orange-200 transition hover:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex h-9 items-center gap-2 rounded-lg border border-orange-500/30 bg-orange-500/10 px-2.5 text-[11px] font-semibold text-orange-200 transition hover:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-50 sm:px-3 sm:text-xs"
           >
             {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
             {exporting ? 'Preparing PDF...' : 'Export history PDF'}
@@ -969,12 +983,12 @@ function UploadZone({ uploading, onPick }: { uploading: boolean; onPick: () => v
     <button
       onClick={onPick}
       disabled={uploading}
-      className="group flex min-h-44 w-full flex-col items-center justify-center rounded-lg border-2 border-dashed border-white/10 bg-white/[0.03] p-8 text-center transition hover:border-orange-500/70 hover:bg-orange-500/5 disabled:opacity-70"
+      className="group flex min-h-36 w-full flex-col items-center justify-center rounded-lg border-2 border-dashed border-white/10 bg-white/[0.03] p-5 text-center transition hover:border-orange-500/70 hover:bg-orange-500/5 disabled:opacity-70 sm:min-h-44 sm:p-8"
     >
       <div className="flex h-14 w-14 items-center justify-center rounded-full bg-orange-500/15 text-orange-400 transition group-hover:scale-105">
         {uploading ? <Loader2 className="animate-spin" size={26} /> : <Upload size={26} />}
       </div>
-      <p className="mt-4 text-lg font-semibold">{uploading ? 'Extracting receipt data...' : 'Upload JPG, PNG, or PDF receipt'}</p>
+      <p className="mt-3 text-base font-semibold sm:mt-4 sm:text-lg">{uploading ? 'Extracting receipt data...' : 'Upload JPG, PNG, or PDF receipt'}</p>
       <p className="mt-1 text-sm text-slate-500">OpenAI extracts the printed values, then ReceiptAI converts them using dated exchange rates.</p>
     </button>
   );
@@ -1023,7 +1037,7 @@ function ReceiptTable({
           Refreshing Supabase history...
         </div>
       )}
-      <div className="grid grid-cols-[1.2fr_0.8fr_0.7fr_0.7fr_32px] gap-3 border-b border-white/10 px-4 py-3 text-xs uppercase tracking-wide text-slate-500">
+      <div className="hidden grid-cols-[1.2fr_0.8fr_0.7fr_0.7fr_32px] gap-3 border-b border-white/10 px-4 py-3 text-xs uppercase tracking-wide text-slate-500 sm:grid">
         <span>Merchant</span>
         <span>Category</span>
         <span>Status</span>
@@ -1034,7 +1048,7 @@ function ReceiptTable({
         <button
           key={receipt.id}
           onClick={() => onSelect(receipt)}
-          className={`grid w-full grid-cols-[1.2fr_0.8fr_0.7fr_0.7fr_32px] items-center gap-3 border-b border-white/5 px-4 py-4 text-left text-sm transition last:border-0 ${
+          className={`grid w-full grid-cols-[1fr_auto] items-start gap-x-3 gap-y-3 border-b border-white/5 px-3 py-3.5 text-left text-sm transition last:border-0 sm:grid-cols-[1.2fr_0.8fr_0.7fr_0.7fr_32px] sm:items-center sm:gap-3 sm:px-4 sm:py-4 ${
             selectedId === receipt.id ? 'bg-orange-500/10' : 'hover:bg-white/[0.06]'
           }`}
         >
@@ -1042,9 +1056,9 @@ function ReceiptTable({
             <span className="block truncate font-medium">{receipt.merchant || 'Unknown merchant'}</span>
             <span className="block truncate text-xs text-slate-500">{receipt.date || receipt.created_at?.slice(0, 10)} • {receipt.transaction_ref || receipt.id.slice(0, 8)}</span>
           </span>
-          <span className="truncate text-slate-300">{receipt.category}</span>
-          <StatusPill status={receipt.status} />
-          <span className="text-right">
+          <span className="col-start-1 row-start-2 truncate text-xs text-slate-400 sm:col-auto sm:row-auto sm:text-sm sm:text-slate-300">{receipt.category}</span>
+          <span className="col-start-2 row-start-1 justify-self-end sm:col-auto sm:row-auto sm:justify-self-auto"><StatusPill status={receipt.status} /></span>
+          <span className="col-span-2 row-start-3 text-left sm:col-auto sm:row-auto sm:text-right">
             <span className="block font-semibold">Original: {money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</span>
             {receipt.converted_total !== null && receipt.display_currency === currency ? (
               <span className="block text-xs text-emerald-300">Converted: {money(receipt.converted_total, receipt.display_currency)}</span>
@@ -1052,7 +1066,7 @@ function ReceiptTable({
               <span className="block text-xs text-amber-300">Conversion unavailable</span>
             )}
           </span>
-          <ChevronRight size={17} className="text-slate-500" />
+          <ChevronRight size={17} className="hidden text-slate-500 sm:block" />
         </button>
       ))}
     </div>
@@ -1090,7 +1104,7 @@ function DetailsPanel({
 }) {
   if (!receipt) {
     return (
-      <aside className="flex min-h-[520px] flex-col items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] p-8 text-center">
+      <aside className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] p-6 text-center sm:min-h-[520px] sm:p-8">
         <FileText size={34} className="text-slate-500" />
         <p className="mt-3 text-lg font-semibold">Select a receipt</p>
         <p className="mt-1 text-sm text-slate-500">Receipt details, approval workflow, edits, and PDF export will appear here.</p>
@@ -1100,11 +1114,11 @@ function DetailsPanel({
 
   const form = editForm;
   return (
-    <aside className="rounded-lg border border-white/10 bg-white/[0.05] p-5 shadow-2xl shadow-black/20 backdrop-blur">
+    <aside className="rounded-lg border border-white/10 bg-white/[0.05] p-4 shadow-2xl shadow-black/20 backdrop-blur sm:p-5">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <StatusPill status={receipt.status} />
-          <h3 className="mt-3 truncate text-2xl font-semibold">{receipt.merchant || 'Unknown merchant'}</h3>
+          <h3 className="mt-3 truncate text-xl font-semibold sm:text-2xl">{receipt.merchant || 'Unknown merchant'}</h3>
           <p className="mt-1 text-sm text-slate-500">{receipt.date || 'No date'} • {receipt.transaction_ref || receipt.id.slice(0, 8)}</p>
         </div>
         <button onClick={() => setEditForm(form ? null : receiptToForm(receipt))} className="rounded-lg border border-white/10 bg-white/5 p-2 transition hover:bg-white/10">
@@ -1167,7 +1181,7 @@ function DetailsPanel({
           </div>
           <div className="mt-5 rounded-lg border border-orange-500/20 bg-orange-500/10 p-4">
             <p className="text-xs uppercase tracking-wide text-orange-300">Original total</p>
-            <p className="mt-1 text-3xl font-bold">{money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</p>
+            <p className="mt-1 break-words text-2xl font-bold sm:text-3xl">{money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</p>
             {receipt.converted_total !== null && receipt.display_currency === displayCurrency ? (
               <p className="mt-2 text-sm text-emerald-300">Converted: {money(receipt.converted_total, receipt.display_currency || 'MAD')}</p>
             ) : (
@@ -1184,12 +1198,12 @@ function DetailsPanel({
               <p className="mt-2 text-sm leading-6 text-slate-300">{receipt.insight}</p>
             </div>
           )}
-          <div className="mt-5 grid grid-cols-3 gap-2">
+          <div className="mt-5 grid grid-cols-3 gap-1.5 sm:gap-2">
             <button onClick={onApprove} disabled={saving} className="rounded-lg bg-emerald-500/15 px-3 py-2 text-sm text-emerald-300 transition hover:bg-emerald-500/25">Approve</button>
             <button onClick={onReject} disabled={saving} className="rounded-lg bg-red-500/15 px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/25">Reject</button>
             <button onClick={onPending} disabled={saving} className="rounded-lg bg-sky-500/15 px-3 py-2 text-sm text-sky-300 transition hover:bg-sky-500/25">Pending</button>
           </div>
-          <div className="mt-3 grid grid-cols-3 gap-2">
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
             <button onClick={onExport} className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm transition hover:bg-white/10">
               <Download size={16} />
               Export PDF
@@ -1238,7 +1252,7 @@ function StatusPill({ status }: { status: ReceiptStatus }) {
 
 function ChartCard({ title, empty, children }: { title: string; empty: boolean; children: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.04] p-5">
+    <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3.5 sm:p-5">
       <h3 className="text-base font-semibold">{title}</h3>
       <div className="mt-4">
         {empty ? (
