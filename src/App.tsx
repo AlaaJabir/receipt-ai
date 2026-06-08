@@ -156,6 +156,7 @@ export default function App() {
   );
   const [currencyError, setCurrencyError] = useState('');
   const [editForm, setEditForm] = useState<ReceiptFormState | null>(null);
+  const [selectedReceiptIds, setSelectedReceiptIds] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -192,6 +193,10 @@ export default function App() {
         selectedMonth: filters.month || 'all',
       });
       setReceipts(data.receipts || []);
+      setSelectedReceiptIds(current => {
+        const availableIds = new Set((data.receipts || []).map((receipt: Receipt) => receipt.id));
+        return new Set([...current].filter(id => availableIds.has(id)));
+      });
       setSelectedReceipt(current => {
         if (current && data.receipts?.some((receipt: Receipt) => receipt.id === current.id)) {
           return data.receipts.find((receipt: Receipt) => receipt.id === current.id);
@@ -406,6 +411,35 @@ export default function App() {
       await fetchReceipts();
     } catch (err: any) {
       setError(err.message || 'Duplicate cleanup failed.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteSelectedReceipts() {
+    const ids = [...selectedReceiptIds];
+    if (!ids.length) return;
+    const confirmed = window.confirm(
+      `Permanently delete ${ids.length} selected receipt${ids.length === 1 ? '' : 's'}? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    setSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch('/api/receipts', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      const data = await readApiResponse(res);
+      if (!res.ok) throw new Error(data.error || 'Failed to delete selected receipts.');
+      setSelectedReceiptIds(new Set());
+      setNotice(`${data.deleted || ids.length} receipt${(data.deleted || ids.length) === 1 ? '' : 's'} permanently deleted.`);
+      await fetchReceipts();
+    } catch (err: any) {
+      setError(err.message || 'Bulk delete failed.');
     } finally {
       setSaving(false);
     }
@@ -647,13 +681,34 @@ export default function App() {
                   <ReceiptTable
                     receipts={receipts}
                     selectedId={selectedReceipt?.id}
+                    selectedReceiptIds={selectedReceiptIds}
                     loading={loading}
+                    saving={saving}
                     currency={settings.defaultCurrency}
                     month={filters.month}
                     onSelect={receipt => {
                       setSelectedReceipt(receipt);
                       setEditForm(null);
                     }}
+                    onToggleSelected={id => {
+                      setSelectedReceiptIds(current => {
+                        const next = new Set(current);
+                        if (next.has(id)) next.delete(id);
+                        else next.add(id);
+                        return next;
+                      });
+                    }}
+                    onSelectAllVisible={() => {
+                      setSelectedReceiptIds(current => {
+                        const visibleIds = receipts.map(receipt => receipt.id);
+                        const allVisibleSelected = visibleIds.every(id => current.has(id));
+                        if (allVisibleSelected) {
+                          return new Set([...current].filter(id => !visibleIds.includes(id)));
+                        }
+                        return new Set([...current, ...visibleIds]);
+                      });
+                    }}
+                    onDeleteSelected={deleteSelectedReceipts}
                   />
                 </div>
 
@@ -997,17 +1052,27 @@ function UploadZone({ uploading, onPick }: { uploading: boolean; onPick: () => v
 function ReceiptTable({
   receipts,
   selectedId,
+  selectedReceiptIds,
   loading,
+  saving,
   currency,
   month,
   onSelect,
+  onToggleSelected,
+  onSelectAllVisible,
+  onDeleteSelected,
 }: {
   receipts: Receipt[];
   selectedId?: string;
+  selectedReceiptIds: Set<string>;
   loading: boolean;
+  saving: boolean;
   currency: string;
   month: string;
   onSelect: (receipt: Receipt) => void;
+  onToggleSelected: (id: string) => void;
+  onSelectAllVisible: () => void;
+  onDeleteSelected: () => void;
 }) {
   if (loading && !receipts.length) {
     return (
@@ -1029,15 +1094,43 @@ function ReceiptTable({
     );
   }
 
+  const selectedCount = selectedReceiptIds.size;
+  const allVisibleSelected = receipts.length > 0 && receipts.every(receipt => selectedReceiptIds.has(receipt.id));
+
   return (
     <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.04]">
+      <div className="flex flex-col gap-3 border-b border-white/10 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-4">
+        <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-300">
+          <input
+            type="checkbox"
+            checked={allVisibleSelected}
+            onChange={onSelectAllVisible}
+            className="h-4 w-4 rounded border-white/20 bg-black/40 accent-orange-500"
+          />
+          Select all visible
+        </label>
+        <div className="flex items-center justify-between gap-3 sm:justify-end">
+          <span className="text-xs text-slate-500">
+            {selectedCount ? `${selectedCount} selected` : `${receipts.length} in history`}
+          </span>
+          <button
+            onClick={onDeleteSelected}
+            disabled={saving || selectedCount === 0}
+            className="flex h-9 items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 text-xs font-semibold text-red-300 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+            Delete selected
+          </button>
+        </div>
+      </div>
       {loading && (
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2 text-xs text-slate-400">
           <Loader2 size={13} className="animate-spin" />
           Refreshing Supabase history...
         </div>
       )}
-      <div className="hidden grid-cols-[1.2fr_0.8fr_0.7fr_0.7fr_32px] gap-3 border-b border-white/10 px-4 py-3 text-xs uppercase tracking-wide text-slate-500 sm:grid">
+      <div className="hidden grid-cols-[32px_1.2fr_0.8fr_0.7fr_0.7fr_32px] gap-3 border-b border-white/10 px-4 py-3 text-xs uppercase tracking-wide text-slate-500 sm:grid">
+        <span />
         <span>Merchant</span>
         <span>Category</span>
         <span>Status</span>
@@ -1045,29 +1138,39 @@ function ReceiptTable({
         <span />
       </div>
       {receipts.map(receipt => (
-        <button
+        <div
           key={receipt.id}
-          onClick={() => onSelect(receipt)}
-          className={`grid w-full grid-cols-[1fr_auto] items-start gap-x-3 gap-y-3 border-b border-white/5 px-3 py-3.5 text-left text-sm transition last:border-0 sm:grid-cols-[1.2fr_0.8fr_0.7fr_0.7fr_32px] sm:items-center sm:gap-3 sm:px-4 sm:py-4 ${
+          className={`grid w-full grid-cols-[28px_1fr_auto] items-start gap-x-3 gap-y-3 border-b border-white/5 px-3 py-3.5 text-left text-sm transition last:border-0 sm:grid-cols-[32px_1.2fr_0.8fr_0.7fr_0.7fr_32px] sm:items-center sm:gap-3 sm:px-4 sm:py-4 ${
             selectedId === receipt.id ? 'bg-orange-500/10' : 'hover:bg-white/[0.06]'
           }`}
         >
-          <span className="min-w-0">
+          <label className="col-start-1 row-span-3 flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-black/20 sm:row-auto">
+            <input
+              type="checkbox"
+              checked={selectedReceiptIds.has(receipt.id)}
+              onChange={() => onToggleSelected(receipt.id)}
+              className="h-4 w-4 accent-orange-500"
+              aria-label={`Select ${receipt.merchant || 'receipt'}`}
+            />
+          </label>
+          <button type="button" onClick={() => onSelect(receipt)} className="col-start-2 min-w-0 text-left">
             <span className="block truncate font-medium">{receipt.merchant || 'Unknown merchant'}</span>
             <span className="block truncate text-xs text-slate-500">{receipt.date || receipt.created_at?.slice(0, 10)} • {receipt.transaction_ref || receipt.id.slice(0, 8)}</span>
-          </span>
-          <span className="col-start-1 row-start-2 truncate text-xs text-slate-400 sm:col-auto sm:row-auto sm:text-sm sm:text-slate-300">{receipt.category}</span>
-          <span className="col-start-2 row-start-1 justify-self-end sm:col-auto sm:row-auto sm:justify-self-auto"><StatusPill status={receipt.status} /></span>
-          <span className="col-span-2 row-start-3 text-left sm:col-auto sm:row-auto sm:text-right">
+          </button>
+          <button type="button" onClick={() => onSelect(receipt)} className="col-start-2 row-start-2 truncate text-left text-xs text-slate-400 sm:col-auto sm:row-auto sm:text-sm sm:text-slate-300">{receipt.category}</button>
+          <button type="button" onClick={() => onSelect(receipt)} className="col-start-3 row-start-1 justify-self-end sm:col-auto sm:row-auto sm:justify-self-auto"><StatusPill status={receipt.status} /></button>
+          <button type="button" onClick={() => onSelect(receipt)} className="col-span-2 col-start-2 row-start-3 text-left sm:col-auto sm:row-auto sm:text-right">
             <span className="block font-semibold">Original: {money(receipt.original_total ?? receipt.total, receipt.original_currency || receipt.currency || 'MAD')}</span>
             {receipt.converted_total !== null && receipt.display_currency === currency ? (
               <span className="block text-xs text-emerald-300">Converted: {money(receipt.converted_total, receipt.display_currency)}</span>
             ) : (
               <span className="block text-xs text-amber-300">Conversion unavailable</span>
             )}
-          </span>
-          <ChevronRight size={17} className="hidden text-slate-500 sm:block" />
-        </button>
+          </button>
+          <button type="button" onClick={() => onSelect(receipt)} className="hidden text-slate-500 sm:block">
+            <ChevronRight size={17} />
+          </button>
+        </div>
       ))}
     </div>
   );

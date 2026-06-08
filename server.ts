@@ -963,6 +963,28 @@ app.delete('/api/receipts/:id/duplicates', async (req, res) => {
   }
 });
 
+app.delete('/api/receipts', async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids)
+      ? Array.from(new Set(req.body.ids.filter((id: unknown) => typeof id === 'string' && id.trim()).map((id: string) => id.trim())))
+      : [];
+
+    if (!ids.length) return res.status(400).json({ error: 'Select at least one receipt to delete.' });
+    if (ids.length > 500) return res.status(400).json({ error: 'Delete up to 500 receipts at once.' });
+
+    const { data, error } = await (getSupabase() as any)
+      .from('receipts')
+      .delete()
+      .in('id', ids)
+      .select('id');
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true, deleted: data?.length || 0 });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/receipts/:id', async (req, res) => {
   try {
     const { error } = await getSupabase().from('receipts').delete().eq('id', req.params.id);
