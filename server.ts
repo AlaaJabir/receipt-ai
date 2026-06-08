@@ -18,6 +18,7 @@ const CATEGORIES = ['Meals', 'Transport', 'Software', 'Office', 'Fuel', 'Travel'
 const STATUSES = ['Pending Approval', 'Approved', 'Rejected'];
 const EXCHANGE_RATE_API_URL = 'https://api.frankfurter.dev/v2/rate';
 const LATEST_RATE_CACHE_MS = 60 * 60 * 1000;
+const EXCHANGE_RATE_REQUEST_ATTEMPTS = 2;
 
 type CachedRate = {
   expiresAt: number;
@@ -192,12 +193,25 @@ async function requestExchangeRate(base: string, quote: string, date?: string) {
   if (date) url.searchParams.set('date', date);
 
   const promise = (async () => {
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) throw new Error(`Exchange-rate API returned ${response.status}.`);
+    let lastError: Error | null = null;
 
-    const data = await response.json() as { rate?: number; date?: string };
-    if (!Number.isFinite(data.rate) || !data.date) throw new Error('Exchange-rate API returned an invalid rate.');
-    return { rate: Number(data.rate), date: data.date };
+    for (let attempt = 1; attempt <= EXCHANGE_RATE_REQUEST_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(12000) });
+        if (!response.ok) throw new Error(`Exchange-rate service returned ${response.status}.`);
+
+        const data = await response.json() as { rate?: number; date?: string };
+        if (!Number.isFinite(data.rate) || !data.date) throw new Error('Exchange-rate service returned an invalid rate.');
+        return { rate: Number(data.rate), date: data.date };
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt < EXCHANGE_RATE_REQUEST_ATTEMPTS) {
+          await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+        }
+      }
+    }
+
+    throw lastError || new Error('Exchange-rate service is unavailable.');
   })();
 
   exchangeRateCache.set(cacheKey, {
